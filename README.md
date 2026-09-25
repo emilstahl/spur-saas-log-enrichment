@@ -91,32 +91,57 @@ python anomaly_detector.py \
 
 ## Configuration
 
-### Critical VPN/Proxy Operators
+### Watchlist hits
 
-By default, only these operators trigger command-line alerts:
-- **ASTRILL_VPN**
-- **PROXYSOCKS5_PROXY**
+Every VPN/proxy match in the report is shown in the CLI summary and counted as critical; the
+watchlist (Spur's operator classification, or your `--ip-file`) is the place to curate what
+counts. Operator names come from `tunnels.operator` in `reports/enrichment_report_YYYYMMDD.json`.
 
-All detections are saved to reports, but only critical operators appear in CLI output. This minimizes PII exposure during webinars or live demos.
+### Teamtailor (applicant IPs)
 
-**To customize**, edit `anomaly_detector.py`:
+The Teamtailor extractor reads the audit log (`/v1/audit-events`) and yields one entry per
+(candidate, IP) for applicant actions. One API key per workspace, named by workspace:
 
-```python
-class AnomalyDetector:
-    CRITICAL_OPERATORS = [
-        'ASTRILL_VPN',
-        'PROXYSOCKS5_PROXY',
-        'NORDVPN',           # Add more
-        'MULLVAD_VPN',       # as needed
-    ]
+```bash
+echo "TEAMTAILOR_API_KEY_GLOBAL=..." >> .env   # workspace "global"
+echo "TEAMTAILOR_API_KEY_DK=..." >> .env       # workspace "dk"
 ```
 
-**Common operator names**:
-- VPNs: `NORDVPN`, `EXPRESSVPN`, `MULLVAD_VPN`, `PROTONVPN`, `SURFSHARK`
-- Privacy: `TOR_EXIT_NODE`, `SHADOWSOCKS`, `LANTERN`
-- Proxies: `LUMINATI`, `SMARTPROXY`, `OXYLABS`, `BRIGHTDATA`
+Every `TEAMTAILOR_API_KEY_<WORKSPACE>` variable is picked up automatically; `--no-teamtailor`
+skips the source. The key needs read access to audit events and candidates (admin API key).
 
-Find operator names in your reports at `reports/enrichment_report_YYYYMMDD.json` under the `tunnels.operator` field.
+### Slack alert cron (`slack_alert_cron.py`)
+
+Runs the detector over the last day and posts only *new* findings to a Slack incoming webhook;
+alerted `(user, IP, operator, source)` keys are kept in `.slack_alert_state.json`, so any
+cadence up to 24h works and a finding alerts once. A lock file stops overlapping runs.
+
+```bash
+*/30 * * * * cd /path/to/repo && venv/bin/python slack_alert_cron.py >> anomaly_cron.log 2>&1
+./slack_alert_cron.py --dry-run                    # preview: no Slack post, no notes, no state writes
+./slack_alert_cron.py reports/some_report.json     # replay a report instead of extracting
+./note_report.py reports/some_report.json          # retry the profile notes of a posted report
+```
+
+Credentials are read from `.env` next to the script (real environment variables win):
+
+| Variable | Purpose |
+|---|---|
+| `SLACK_WEBHOOK_URL` | Incoming webhook the alerts are posted to (required) |
+| `TEAMTAILOR_API_KEY_<WORKSPACE>` | One key per workspace, as for the detector |
+| `TEAMTAILOR_NOTE_USER_ID` | Author of profile notes (a user id in the workspace) |
+| `TEAMTAILOR_NOTE_USER_EMAIL` | Or: look the author up by email in each workspace |
+| `TEAMTAILOR_NOTE_USER_ID_<WORKSPACE>` | Per-workspace author override |
+
+Teamtailor user ids are per workspace. The author is resolved in that order; when nothing
+matches in a workspace, the note is posted as the recruiter (job owner) of the candidate's
+application; such a note ends with an "automated message from team.blue Security" footer so
+recruiters do not read it as their colleague's own words. Teamtailor findings get a security note on the profile once per candidate
+(`.teamtailor_noted.json`); applications sent via an AI job tool get an info note only
+(`.teamtailor_ai_noted.json`), no Slack alert; a bare-IP referrer is alerted as a finding.
+A note whose text is already on the profile is never posted twice.
+
+`user_logins.py [USER_ID] [DAYS]` prints one Slack user's recent logins with watchlist hits.
 
 ## Output
 
@@ -162,6 +187,7 @@ All data is saved to `reports/`:
 --zoom-client-id ID          Zoom Client ID (required for Zoom)
 --zoom-client-secret SECRET  Zoom Client Secret (required for Zoom)
 --days N                     Days to analyze (default: 30, Slack limited to 7 on most plans)
+--no-teamtailor              Skip Teamtailor even if TEAMTAILOR_API_KEY_<WORKSPACE> is set
 
 # Enrichment Method (required)
 --enrichment spur            Use Spur API for VPN/proxy detection
@@ -181,10 +207,14 @@ saas-enrichment/
 ├── anomaly_detector.py       # Main CLI tool
 ├── extractors/
 │   ├── slack_extractor.py    # Slack API integration
-│   └── zoom_extractor.py     # Zoom API integration
+│   ├── zoom_extractor.py     # Zoom API integration
+│   └── teamtailor_extractor.py  # Teamtailor ATS audit log (applicant IPs)
 ├── enrichment/
 │   ├── spur_enrichment.py    # Spur API integration
 │   └── file_enrichment.py    # File-based IP matching
+├── slack_alert_cron.py       # Cron wrapper: new findings -> Slack, Teamtailor profile notes
+├── note_report.py            # Retry profile notes for an already-posted report
+├── user_logins.py            # One Slack user's recent logins, watchlist-flagged
 ├── reports/                  # Output directory (auto-created)
 ├── examples/                 # Sample outputs
 └── test_credentials.py       # Credential testing tool
