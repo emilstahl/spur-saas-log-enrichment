@@ -110,6 +110,38 @@ echo "TEAMTAILOR_API_KEY_DK=..." >> .env       # workspace "dk"
 Every `TEAMTAILOR_API_KEY_<WORKSPACE>` variable is picked up automatically; `--no-teamtailor`
 skips the source. The key needs read access to audit events and candidates (admin API key).
 
+### Slack alert cron (`slack_alert_cron.py`)
+
+Runs the detector over the last day and posts only *new* findings to a Slack incoming webhook;
+alerted `(user, IP, operator, source)` keys are kept in `.slack_alert_state.json`, so any
+cadence up to 24h works and a finding alerts once. A lock file stops overlapping runs.
+
+```bash
+*/30 * * * * cd /path/to/repo && venv/bin/python slack_alert_cron.py >> anomaly_cron.log 2>&1
+./slack_alert_cron.py --dry-run                    # preview: no Slack post, no notes, no state writes
+./slack_alert_cron.py reports/some_report.json     # replay a report instead of extracting
+./note_report.py reports/some_report.json          # retry the profile notes of a posted report
+```
+
+Credentials are read from `.env` next to the script (real environment variables win):
+
+| Variable | Purpose |
+|---|---|
+| `SLACK_WEBHOOK_URL` | Incoming webhook the alerts are posted to (required) |
+| `TEAMTAILOR_API_KEY_<WORKSPACE>` | One key per workspace, as for the detector |
+| `TEAMTAILOR_NOTE_USER_ID` | Author of profile notes (a user id in the workspace) |
+| `TEAMTAILOR_NOTE_USER_EMAIL` | Or: look the author up by email in each workspace |
+| `TEAMTAILOR_NOTE_USER_ID_<WORKSPACE>` | Per-workspace author override |
+
+Teamtailor user ids are per workspace. The author is resolved in that order; when nothing
+matches in a workspace, the note is posted as the recruiter (job owner) of the candidate's
+application. Teamtailor findings get a security note on the profile once per candidate
+(`.teamtailor_noted.json`); applications sent via an AI job tool get an info note only
+(`.teamtailor_ai_noted.json`), no Slack alert; a bare-IP referrer is alerted as a finding.
+A note whose text is already on the profile is never posted twice.
+
+`user_logins.py [USER_ID] [DAYS]` prints one Slack user's recent logins with watchlist hits.
+
 ## Output
 
 ### Command Line (Critical Alerts Only)
@@ -179,6 +211,9 @@ saas-enrichment/
 ├── enrichment/
 │   ├── spur_enrichment.py    # Spur API integration
 │   └── file_enrichment.py    # File-based IP matching
+├── slack_alert_cron.py       # Cron wrapper: new findings -> Slack, Teamtailor profile notes
+├── note_report.py            # Retry profile notes for an already-posted report
+├── user_logins.py            # One Slack user's recent logins, watchlist-flagged
 ├── reports/                  # Output directory (auto-created)
 ├── examples/                 # Sample outputs
 └── test_credentials.py       # Credential testing tool
