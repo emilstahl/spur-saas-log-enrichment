@@ -55,6 +55,10 @@ TT_API = 'https://api.teamtailor.com/v1'
 TT_NOTE = ('<p>Security flag: identified as a possible DPRK (North Korean) IT worker.</p>'
            '<p>Do not progress or engage with this candidate.</p>'
            '<p>Contact Security (emil.stahl@team.blue) before any further contact.</p>')
+# Appended to a note that goes out through the recruiter's account (Security has no user in that workspace),
+# so recruiters do not read it as their colleague's own words.
+RECRUITER_FOOTER = ('<p><em>Automated message from team.blue Security (emil.stahl@team.blue), posted through '
+                    "the recruiter's account because Security has no user in this workspace.</em></p>")
 # Referrer hostname substring -> AI job tool name. These get an info note only, no Slack alert.
 AI_TOOLS = {'jackandjill': 'Jack & Jill', 'hirify': 'Hirify', 'jobright': 'Jobright', 'simplify': 'Simplify',
             'scale.jobs': 'Scale.jobs', 'perplexity': 'Perplexity', 'chatgpt': 'ChatGPT'}
@@ -416,19 +420,21 @@ def profile_has_note(account, candidate_id, note_html):
     except Exception as e:
         warn(f"teamtailor note check failed for {account}:{candidate_id}: {e}")
         return False
-    want = note_text(note_html)
+    want = note_text(note_html)  # a stored note may carry RECRUITER_FOOTER after the body
     acts = d.get('data') if isinstance(d, dict) else None
     for act in acts if isinstance(acts, list) else []:
         try:  # the activity's data attribute is a JSON string: {"note": "<p>...</p>"}
             existing = json.loads((act.get('attributes') or {}).get('data') or '{}').get('note')
         except (ValueError, AttributeError):
             continue
-        if existing and note_text(existing) == want:
+        if existing and note_text(existing).startswith(want):
             return True
     return False
 
 
-def post_note(account, candidate_id, user_id, note_html):
+def post_note(account, candidate_id, user_id, note_html, as_recruiter=False):
+    if as_recruiter:
+        note_html += RECRUITER_FOOTER
     body = {'data': {'type': 'notes', 'attributes': {'note': note_html}, 'relationships': {
         'candidate': {'data': {'type': 'candidates', 'id': candidate_id}},
         'user': {'data': {'type': 'users', 'id': user_id}}}}}
@@ -454,8 +460,10 @@ def post_ai_notes(ai, dry_run=False):
         if nk in noted:
             continue
         user_id = note_user_id(a['account']) if tt_key(a['account']) else None
+        as_recruiter = False
         if not user_id and tt_key(a['account']):
             user_id = application_recruiter(a['account'], a['application_id'])
+            as_recruiter = bool(user_id)
         if not user_id:
             continue
         if dry_run:
@@ -469,7 +477,7 @@ def post_ai_notes(ai, dry_run=False):
             save_json(AI_NOTED, sorted(noted))
             continue
         try:
-            post_note(a['account'], a['candidate_id'], user_id, note)
+            post_note(a['account'], a['candidate_id'], user_id, note, as_recruiter)
         except Exception as e:
             warn(f"teamtailor AI note failed for {nk}: {e}")
             continue
@@ -491,7 +499,10 @@ def post_teamtailor_notes(new, dry_run=False):
         if nk in noted:
             a['tt_note'] = 'already flagged'
             continue
-        user_id = (note_user_id(a.get('account')) or a.get('tt_recruiter_id')) if tt_key(a.get('account')) else None
+        user_id = note_user_id(a.get('account')) if tt_key(a.get('account')) else None
+        as_recruiter = False
+        if not user_id and tt_key(a.get('account')) and a.get('tt_recruiter_id'):
+            user_id, as_recruiter = a['tt_recruiter_id'], True
         if not user_id:
             a['tt_note'] = 'not flagged (no key/user configured)'
             continue
@@ -504,7 +515,7 @@ def post_teamtailor_notes(new, dry_run=False):
             save_json(NOTED, sorted(noted))
             continue
         try:
-            post_note(a['account'], a['candidate_id'], user_id, TT_NOTE)
+            post_note(a['account'], a['candidate_id'], user_id, TT_NOTE, as_recruiter)
         except Exception as e:
             warn(f"teamtailor note failed for {nk}: {e}")
             a['tt_note'] = 'note FAILED, flag manually'

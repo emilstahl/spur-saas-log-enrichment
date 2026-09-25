@@ -135,7 +135,8 @@ Credentials are read from `.env` next to the script (real environment variables 
 
 Teamtailor user ids are per workspace. The author is resolved in that order; when nothing
 matches in a workspace, the note is posted as the recruiter (job owner) of the candidate's
-application. Teamtailor findings get a security note on the profile once per candidate
+application; such a note ends with an "automated message from team.blue Security" footer so
+recruiters do not read it as their colleague's own words. Teamtailor findings get a security note on the profile once per candidate
 (`.teamtailor_noted.json`); applications sent via an AI job tool get an info note only
 (`.teamtailor_ai_noted.json`), no Slack alert; a bare-IP referrer is alerted as a finding.
 A note whose text is already on the profile is never posted twice.

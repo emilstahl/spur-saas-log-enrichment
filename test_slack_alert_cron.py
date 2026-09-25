@@ -247,7 +247,7 @@ class TestTeamtailorNotes(Base):
         # e.g. posted before a state reset, or on a candidate since merged into this one; Teamtailor rewrites the HTML
         stored = cron.TT_NOTE.replace('(emil.stahl@team.blue)', '(<a href="mailto:emil.stahl@team.blue">emil.stahl@team.blue</a>)')
         acts = {'data': [{'attributes': {'code': 'note', 'data': json.dumps({'note': '<p>Great candidate</p>'})}},
-                         {'attributes': {'code': 'note', 'data': json.dumps({'note': stored})}}]}
+                         {'attributes': {'code': 'note', 'data': json.dumps({'note': stored + cron.RECRUITER_FOOTER})}}]}
         self.fake_session_request(lambda m, u, kw: resp(json_data=acts) if m == 'GET' else resp())
         new = [{'source': 'teamtailor', 'account': 'test', 'candidate_id': '1'}]
         cron.post_teamtailor_notes(new)
@@ -303,6 +303,7 @@ class TestTeamtailorNotes(Base):
             cron.post_teamtailor_notes(new)
             self.assertEqual(new[0]['tt_note'], 'profile flagged')
             self.assertEqual(self.calls[-1][2]['json']['data']['relationships']['user']['data']['id'], 'rec1')
+            self.assertEqual(self.calls[-1][2]['json']['data']['attributes']['note'], cron.TT_NOTE + cron.RECRUITER_FOOTER)
             # AI notes look the recruiter up per application
             self.fake_session_request(lambda m, u, kw: resp(json_data={'included': [{'type': 'jobs', 'id': 'j'}, {'type': 'users', 'id': 'rec2'}]}))
             self.calls.clear()
@@ -310,6 +311,7 @@ class TestTeamtailorNotes(Base):
             self.assertEqual([m for m, u, kw in self.calls], ['GET', 'GET', 'POST'])  # recruiter, existing notes, post
             self.assertIn('/job-applications/70', self.calls[0][1])
             self.assertEqual(self.calls[2][2]['json']['data']['relationships']['user']['data']['id'], 'rec2')
+            self.assertTrue(self.calls[2][2]['json']['data']['attributes']['note'].endswith(cron.RECRUITER_FOOTER))
             self.assertEqual(read(cron.AI_NOTED), ['other:70'])
             self.assertEqual(self.stderr().count('no Teamtailor user'), 1)
             # notes for a workspace without a user are skipped, not 404ed one by one
