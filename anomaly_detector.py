@@ -29,25 +29,6 @@ def teamtailor_keys() -> Dict[str, str]:
 class AnomalyDetector:
     """Main class for detecting IP anomalies in SaaS logs."""
 
-    # Critical VPN/Proxy operators to alert on in CLI output
-    # Edit this list to add/remove operators that require immediate attention
-    CRITICAL_OPERATORS = ['ASTRILL_VPN',
-                          'PROXYSOCKS5_PROXY',
-                          'SHADOW_TECH_VDI',
-                          'GLKVM_VDI',
-                          'KASM_VDI',
-                          'DIGIRDP_VDI',
-                          'OPENAI_VDI',
-                          'PAPERSPACE_VDI',
-                          'NANOKVM_VDI',
-                          'PIKVM_VDI',
-                          'BROWSERLING_VDI',
-                          'SHELLS_VDI',
-                          'GENYMOTION_VDI',
-                          'TINYPILOT_VDI',
-                          'JETKVM_VDI',
-                          'SILO_VDI']
-
     def __init__(self):
         self.slack_data = []
         self.zoom_data = []
@@ -122,11 +103,8 @@ class AnomalyDetector:
                 json.dump(report, f, indent=2)
             print(f"\n✓ Anomaly report saved to {output_file}")
 
-        # Filter anomalies for critical operators only (for CLI display)
-        critical_anomalies = [
-            a for a in self.anomalies
-            if a.get('vpn_operator') in self.CRITICAL_OPERATORS
-        ]
+        # Every watchlist hit is critical
+        critical_anomalies = list(self.anomalies)
 
         # Count and display critical alerts with deduplication
         displayed_count = 0
@@ -200,9 +178,6 @@ class AnomalyDetector:
         else:
             print("\n✓ No critical VPN/proxy detections")
 
-        if report['summary']['total_anomalies'] > len(critical_anomalies):
-            print(
-                f"Note: {report['summary']['total_anomalies'] - len(critical_anomalies)} other VPN detections saved to report (not critical)")
 
         print(f"{'='*60}\n")
         return report
