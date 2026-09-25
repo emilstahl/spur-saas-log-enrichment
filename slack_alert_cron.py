@@ -57,8 +57,7 @@ TT_NOTE = ('<p>Security flag: identified as a possible DPRK (North Korean) IT wo
            '<p>Contact Security (emil.stahl@team.blue) before any further contact.</p>')
 # Appended to a note that goes out through the recruiter's account (Security has no user in that workspace),
 # so recruiters do not read it as their colleague's own words.
-RECRUITER_FOOTER = ('<p><em>Automated message from team.blue Security (emil.stahl@team.blue), posted through '
-                    "the recruiter's account because Security has no user in this workspace.</em></p>")
+RECRUITER_FOOTER = '<p><em>Automated note from team.blue Security (emil.stahl@team.blue).</em></p>'
 # Referrer hostname substring -> AI job tool name. These get an info note only, no Slack alert.
 AI_TOOLS = {'jackandjill': 'Jack & Jill', 'hirify': 'Hirify', 'jobright': 'Jobright', 'simplify': 'Simplify',
             'scale.jobs': 'Scale.jobs', 'perplexity': 'Perplexity', 'chatgpt': 'ChatGPT'}
