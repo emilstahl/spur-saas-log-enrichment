@@ -353,17 +353,23 @@ class TestTeamtailorNotes(Base):
             if u.endswith('/candidates/7'):
                 return resp({'data': {'attributes': {'email': 'c@x'}}})
             return resp({'data': [{'relationships': {'job': {'data': {'id': 'j1'}}}},
-                                  {'relationships': {'job': {'data': None}}}],
+                                  {'relationships': {'job': {'data': None}}},
+                                  {'relationships': {'job': {'data': {'id': 'j2'}}}}],
                          'included': [{'type': 'jobs', 'id': 'j1', 'attributes': {'title': 'Dev'},
                                        'relationships': {'user': {'data': {'id': 'u9'}}}},
-                                      {'type': 'users', 'id': 'u9', 'attributes': {'name': 'Rec'}}]})
+                                      {'type': 'users', 'id': 'u9', 'attributes': {'name': 'Rec'}},
+                                      {'type': 'jobs', 'id': 'j2', 'attributes': {'title': 'Ops'},
+                                       'relationships': {'user': {'data': {'id': 'u10'}}}},
+                                      # invited user without a completed profile: no name, only an email
+                                      {'type': 'users', 'id': 'u10', 'attributes': {'name': None, 'email': 'rec2@x'}}]})
         self.fake_session_request(handler)
         new = [{'source': 'teamtailor', 'account': 'test', 'candidate_id': '7'},
                {'source': 'teamtailor', 'account': 'test', 'candidate_id': '8', 'candidate_email': 'known@x'},
                {'source': 'slack'}]
         cron.add_teamtailor_emails(new)
         self.assertEqual(new[0]['candidate_email'], 'c@x')
-        self.assertEqual(new[0]['tt_jobs'], [('Dev', 'Rec')])
+        self.assertEqual(new[0]['tt_jobs'], [('Dev', 'Rec'), ('Ops', 'rec2@x')])
+        self.assertEqual(new[0]['tt_recruiter_id'], 'u9')  # first job owner is the note author of last resort
         self.assertEqual(new[1]['candidate_email'], 'known@x')
         self.assertEqual([u.rsplit('/', 2)[-2:] for _, u, _ in self.calls],
                          [['candidates', '7'], ['7', 'job-applications'], ['8', 'job-applications']])

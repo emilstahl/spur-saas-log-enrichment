@@ -269,7 +269,9 @@ def add_teamtailor_emails(new):
                     continue
                 owner = (((job.get('relationships') or {}).get('user') or {}).get('data') or {}).get('id')
                 user = inc.get(('users', owner))
-                jobs.append((job['attributes'].get('title'), user['attributes'].get('name') if user else None))
+                ua = (user or {}).get('attributes') or {}
+                # an invited user who never completed their profile has no name: show the email instead
+                jobs.append((job['attributes'].get('title'), ua.get('name') or ua.get('email')))
                 if user and not a.get('tt_recruiter_id'):
                     a['tt_recruiter_id'] = owner  # note author of last resort, see note_user_id
             a['tt_jobs'] = jobs
