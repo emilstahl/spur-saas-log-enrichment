@@ -52,8 +52,6 @@ class Base(unittest.TestCase):
         self.enterContext(patch.object(cron, 'load_env'))  # never read the real .env
         self.enterContext(patch.object(sys, 'stderr', io.StringIO()))
         cron._tt_sessions.clear()
-        cron._whitelist = None  # re-read per test; it is cached for the run
-        self.enterContext(patch.object(cron, 'WHITELIST_FILE', os.path.join(self.tmp, 'whitelist')))
         cron.FAILURES.clear()
         cron._note_users.clear()
         self.calls = []
@@ -182,26 +180,6 @@ class TestPayload(unittest.TestCase):
         self.assertEqual(p['blocks'][0]['text']['text'], '🚨 1 new VPN/proxy detection')
         self.assertIn('❓ *Other*', self.sections(p)[0])
         self.assertIn(f'Last {cron.WINDOW_HOURS}h window', p['blocks'][-1]['elements'][0]['text'])
-
-
-class TestWhitelist(Base):
-    def test_whitelist_comes_from_file_and_env_not_source(self):
-        """Staff identities must not have to be committed to silence them."""
-        with open(cron.WHITELIST_FILE, 'w') as f:
-            f.write("# people, not services\nAnn.Example@team.blue  # on secondment\n\n")
-        cron._whitelist = None
-        with patch.dict(os.environ, {'ALERT_WHITELIST': 'bob@team.blue, carol'}):
-            self.assertTrue(cron.whitelisted({'source': 'okta', 'user': 'x', 'email': 'ann.example@team.blue'}))
-            self.assertTrue(cron.whitelisted({'source': 'slack', 'user': 'x', 'email': 'bob@team.blue'}))
-            self.assertTrue(cron.whitelisted({'source': 'zoom', 'user': 'Carol', 'email': 'Unknown'}))
-            self.assertFalse(cron.whitelisted({'source': 'okta', 'user': 'x', 'email': 'dave@team.blue'}))
-        self.assertIn('system@okta.com', cron.whitelist())  # a service identity, safe in source
-        self.assertNotIn('', cron.whitelist())              # blank lines and bare comments dropped
-
-    def test_a_missing_whitelist_file_is_not_an_error(self):
-        self.assertFalse(os.path.exists(cron.WHITELIST_FILE))
-        self.assertEqual(cron.whitelist(), {e.casefold() for e in cron.DEFAULT_WHITELIST})
-        self.assertEqual(self.stderr(), '')
 
 
 class TestState(Base):

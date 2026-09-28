@@ -70,9 +70,6 @@ anomaly_cron.log
 *.bak*
 data.csv
 
-# Alert whitelist: staff identities, never committed
-.alert_whitelist
-
 # slack_alert_cron run lock and atomic-write temp files
 .slack_alert_cron.lock
 *.json.tmp

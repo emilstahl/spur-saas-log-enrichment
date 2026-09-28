@@ -113,20 +113,6 @@ Ranges matter more than they look: on a 4,000-user org an exact-address watchlis
 `(user, IP)` pair in 24,784 while Okta's own `isProxy` flag marked 270. A malformed row is
 skipped and counted rather than taking the whole watchlist down.
 
-### Alert whitelist
-
-`DEFAULT_WHITELIST` in `slack_alert_cron.py` holds service identities only. People go in
-`.alert_whitelist` (one entry per line, `#` comments, gitignored) or `ALERT_WHITELIST`
-(comma separated) — names or emails, matched case-insensitively:
-
-```bash
-echo "someone@example.com  # approved remote location" >> .alert_whitelist
-```
-
-Keeping them out of the repo matters: a committed whitelist publishes staff identities and
-tells any reader which accounts are unmonitored. Teamtailor findings ignore the whitelist
-entirely, since an applicant chooses their own name.
-
 ### Teamtailor (applicant IPs)
 
 The Teamtailor extractor reads the audit log (`/v1/audit-events`) and yields one entry per
