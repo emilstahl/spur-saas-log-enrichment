@@ -49,7 +49,8 @@ import requests
 
 from anomaly_detector import teamtailor_keys
 
-WHITELIST = {'jirabot'}  # internal Slack/Zoom user names / emails that never alert
+# Service identities that are never a person, so safe to keep in source.
+DEFAULT_WHITELIST = frozenset({'jirabot', 'system@okta.com'})
 REPO = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(REPO, 'reports', 'cron_last_day.json')
 DRY_RUN_REPORT = os.path.join(REPO, 'reports', 'cron_dry_run.json')
@@ -58,6 +59,7 @@ NOTED = os.path.join(REPO, '.teamtailor_noted.json')
 AI_NOTED = os.path.join(REPO, '.teamtailor_ai_noted.json')
 LOCK = os.path.join(REPO, '.slack_alert_cron.lock')
 WATERMARK = os.path.join(REPO, '.slack_alert_watermark.json')
+WHITELIST_FILE = os.path.join(REPO, '.alert_whitelist')
 TT_API = 'https://api.teamtailor.com/v1'
 TT_NOTE = ('<p>Security flag: identified as a possible DPRK (North Korean) IT worker.</p>'
            '<p>Do not progress or engage with this candidate.</p>'
@@ -583,9 +585,38 @@ def post_teamtailor_notes(new, dry_run=False):
 
 # --- findings ----------------------------------------------------------------
 
+_whitelist = None
+
+
+def whitelist():
+    """Names and emails that never alert, matched case-insensitively.
+
+    DEFAULT_WHITELIST holds service identities only. Real people go in .alert_whitelist
+    (one per line, # comments allowed) or ALERT_WHITELIST (comma separated), both of which
+    stay out of git: this repo is a fork of a public project, so a committed whitelist would
+    publish staff identities and hand a reader the list of accounts nobody is watching.
+    Entries are read once per run, so editing the file takes effect on the next run."""
+    global _whitelist
+    if _whitelist is None:
+        entries = set(DEFAULT_WHITELIST)
+        entries |= {e.strip() for e in (os.environ.get('ALERT_WHITELIST') or '').split(',') if e.strip()}
+        try:
+            with open(WHITELIST_FILE) as f:
+                entries |= {line.split('#', 1)[0].strip() for line in f}
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            warn(f"could not read {WHITELIST_FILE} ({e}); using the built-in whitelist only")
+        _whitelist = {e.casefold() for e in entries if e}
+    return _whitelist
+
+
 def whitelisted(a):
-    """Internal Slack/Zoom identities only: a Teamtailor applicant chooses their own name."""
-    return a.get('source') != 'teamtailor' and (a.get('user') in WHITELIST or a.get('email') in WHITELIST)
+    """Internal Slack/Zoom/Okta identities only: a Teamtailor applicant chooses their own name."""
+    if a.get('source') == 'teamtailor':
+        return False
+    listed = whitelist()
+    return any(str(v).casefold() in listed for v in (a.get('user'), a.get('email')) if v)
 
 
 def finding_key(a):
