@@ -27,16 +27,18 @@ def main():
         print(f"no logins for {user_id} in the last {days} days")
         return
 
-    watchlist = FileEnrichment(os.path.join(REPO, 'data.csv')).suspicious_ips
+    watchlist = FileEnrichment(os.path.join(REPO, 'data.csv'))  # .lookup covers ranges too
 
     print(f"\n{len(mine)} login records for {mine[0]['user']} ({mine[0]['email']}), last {days} days:\n")
     for l in mine:
-        flag = f"  🚨 {watchlist[l['ip']]}" if l['ip'] in watchlist else ''
+        hit = watchlist.lookup(l['ip'])
+        flag = f"  🚨 {hit}" if hit else ''
         print(f"{l['timestamp']}  {l['ip']:<15}  x{l['count']:<4} {l['user_agent'][:60]}{flag}")
 
     print("\nUnique IPs:")
     for ip, n in Counter(l['ip'] for l in mine).most_common():
-        flag = f"  🚨 {watchlist[ip]}" if ip in watchlist else ''
+        hit = watchlist.lookup(ip)
+        flag = f"  🚨 {hit}" if hit else ''
         print(f"  {ip:<15}  {n} record(s){flag}")
 
     out = os.path.join(REPO, 'reports', f'user_{user_id}_{days}d.csv')
@@ -46,7 +48,7 @@ def main():
         w.writeheader()
         for l in mine:
             w.writerow({'timestamp': l['timestamp'], 'ip': l['ip'], 'count': l['count'],
-                        'user_agent': l['user_agent'], 'watchlist': watchlist.get(l['ip'], '')})
+                        'user_agent': l['user_agent'], 'watchlist': watchlist.lookup(l['ip']) or ''})
     print(f"\nsaved to {out}")
 
 
