@@ -8,6 +8,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 
+def parse_zoom_ts(value):
+    """Zoom timestamps are ISO 8601, usually Z-suffixed. None for anything unparseable."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
 class ZoomExtractor:
     """Extract IP addresses and user information from Zoom meeting participants."""
     
@@ -92,6 +103,11 @@ class ZoomExtractor:
         
         # Step 1: Get list of past meetings
         meetings = self._get_past_meetings(start_date, end_date)
+        listed = len(meetings)
+        meetings = [m for m in meetings if self._overlaps(m, start_date, end_date)]
+        if listed != len(meetings):
+            print(f"   {listed} meetings listed for those dates, "
+                  f"{len(meetings)} overlap the {(end_date - start_date).total_seconds() / 3600:.2f}h window")
 
         # Step 2: Fetch participants for all meetings in parallel
         print(f"   Fetching {len(meetings)} Zoom meetings...")
@@ -162,6 +178,28 @@ class ZoomExtractor:
             retry_after = response.headers.get('Retry-After')
             time.sleep(int(retry_after) if retry_after and retry_after.isdigit() else 2 ** attempt)
         return response
+
+    @staticmethod
+    def _overlaps(meeting: Dict, start: datetime, end: datetime) -> bool:
+        """Whether a meeting overlaps [start, end].
+
+        The Dashboard API takes from/to as whole dates, so a sub-day window still lists the
+        whole day's meetings, and participants are one request per meeting -- which is what
+        makes this extractor slow. Filtering here lets a 45 minute run fetch the meetings in
+        those 45 minutes instead of every meeting since midnight.
+
+        A meeting is kept if it was still running when the window opened, so someone who
+        joined a long call mid-window is not missed. A meeting with neither timestamp is
+        kept too: a wasted request costs less than a missed IP.
+        """
+        began, finished = parse_zoom_ts(meeting.get('start_time')), parse_zoom_ts(meeting.get('end_time'))
+        if began is None and finished is None:
+            return True
+        if finished is not None and finished < start:
+            return False
+        if began is not None and began > end:
+            return False
+        return True
 
     def _get_past_meetings(self, start_date: datetime, end_date: datetime) -> List[Dict]:
         """Get list of past meetings using Dashboard API."""
