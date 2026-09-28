@@ -42,7 +42,7 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        for name in ('STATE', 'NOTED', 'AI_NOTED', 'LOCK', 'REPORT'):
+        for name in ('STATE', 'NOTED', 'AI_NOTED', 'LOCK', 'REPORT', 'WATERMARK'):
             self.enterContext(patch.object(cron, name, os.path.join(self.tmp, name.lower() + '.json')))
         env = {k: v for k, v in os.environ.items() if not k.startswith('TEAMTAILOR_')}
         env.update({'TEAMTAILOR_API_KEY_TEST': 'k', 'TEAMTAILOR_NOTE_USER_ID': 'u1', 'SLACK_WEBHOOK_URL': 'https://hooks.example/x'})
@@ -569,7 +569,9 @@ class TestDetector(Base):
             elapsed = cron.run_detector()
         self.assertGreaterEqual(elapsed, 0)
         self.assertEqual(run.call_args.kwargs['timeout'], cron.DETECTOR_TIMEOUT)
-        self.assertIn('--days', run.call_args.args[0])
+        cmd = run.call_args.args[0]
+        self.assertIn('--hours', cmd)
+        self.assertEqual(cmd[cmd.index('--hours') + 1], f"{cron.WINDOW_HOURS:.4f}")
         self.assertEqual(run.call_args.args[0][-1], cron.REPORT)
         self.assertEqual(len(cron.FAILURES), 1)
         with patch.object(cron.subprocess, 'run', return_value=done) as run:
@@ -685,7 +687,7 @@ class TestMain(Base):
         ai = [{'account': 'test', 'application_id': '77', 'candidate_id': '5', 'user': 'x', 'job': 'Dev', 'tool': 'a local tool at http://127.0.0.1/\x1b[31m'}]
         out = io.StringIO()
         with patch.object(cron, 'DRY_RUN_REPORT', dry), patch.object(sys, 'argv', ['x', '--dry-run']), \
-                patch.object(cron, 'run_detector', side_effect=lambda out: os.replace(self.report([]), out) or 0.5) as det, \
+                patch.object(cron, 'run_detector', side_effect=lambda out, hours=None: os.replace(self.report([]), out) or 0.5) as det, \
                 patch.object(cron, 'referrer_findings', return_value=(bare, ai)), patch.object(cron.requests, 'post') as post, \
                 redirect_stdout(out):
             cron.main()
@@ -719,7 +721,7 @@ class TestMain(Base):
     def test_non_fatal_failures_exit_1_after_the_work_is_done(self):
         self.fake_session_request(self.tt_get_or_post)
 
-        def failing_scan():
+        def failing_scan(hours=None):
             cron.fail('teamtailor referrer check failed for x: boom')
             return [], []
 
@@ -733,6 +735,95 @@ class TestMain(Base):
         self.assertEqual(post.call_count, 1)  # the alert was still posted ...
         self.assertTrue(os.path.exists(cron.STATE))  # ... and remembered
         self.assertIn('1 non-fatal failure(s)', self.stderr())
+
+    def test_a_clean_run_advances_the_watermark_and_a_failed_one_does_not(self):
+        self.fake_session_request(self.tt_get_or_post)
+
+        def go(scan):
+            with patch.object(sys, 'argv', ['x']), patch.object(cron, 'run_detector', return_value=1.0) as det, \
+                    patch.object(cron, 'REPORT', self.report([self.anomaly()])), \
+                    patch.object(cron, 'referrer_findings', scan), \
+                    patch.object(cron.requests, 'post', return_value=resp()), redirect_stdout(io.StringIO()):
+                try:
+                    cron.main()
+                except SystemExit as e:
+                    return det, e.code
+            return det, 0
+
+        det, code = go(lambda hours=None: ([], []))
+        self.assertEqual(code, 0)
+        mark = read(cron.WATERMARK)['last_success']
+        self.assertLessEqual(cron.parse_ts(mark), datetime.now(timezone.utc))
+        # the mark is the run's START, so events arriving mid-run are not skipped next time
+        self.assertGreaterEqual(cron.parse_ts(mark), datetime.now(timezone.utc) - timedelta(minutes=5))
+        self.assertEqual(det.call_args.args[1], cron.WINDOW_HOURS)  # no mark yet on that first run
+
+        def failing_scan(hours=None):
+            cron.fail('teamtailor referrer check failed for x: boom')
+            return [], []
+
+        cron.FAILURES.clear()
+        det, code = go(failing_scan)
+        self.assertEqual(code, 1)
+        self.assertEqual(read(cron.WATERMARK)['last_success'], mark)  # unchanged: next run re-covers
+        self.assertLess(det.call_args.args[1], 1.0)  # and it scanned only back to that mark
+
+    def test_dry_run_and_replay_never_move_the_watermark(self):
+        self.fake_session_request(self.tt_get_or_post)
+        for argv in (['x', '--dry-run'], ['x', self.report([])]):
+            with patch.object(sys, 'argv', argv), patch.object(cron, 'run_detector', return_value=1.0), \
+                    patch.object(cron, 'REPORT', self.report([])), \
+                    patch.object(cron, 'DRY_RUN_REPORT', self.report([])), \
+                    patch.object(cron, 'referrer_findings', lambda hours=None: ([], [])), \
+                    patch.object(cron.requests, 'post', return_value=resp()), redirect_stdout(io.StringIO()):
+                cron.main()
+            self.assertFalse(os.path.exists(cron.WATERMARK), argv)
+
+
+class TestWindow(Base):
+    def mark(self, when):
+        cron.save_json(cron.WATERMARK, {'last_success': when.isoformat()})
+
+    def test_no_watermark_scans_the_full_ceiling(self):
+        self.assertEqual(cron.window_hours(datetime.now(timezone.utc)), cron.WINDOW_HOURS)
+
+    def test_window_reaches_back_to_the_last_clean_run_plus_overlap(self):
+        now = datetime.now(timezone.utc)
+        self.mark(now - timedelta(minutes=30))
+        # 30m since the last run + a 15m overlap so nothing falls through the seam
+        self.assertAlmostEqual(cron.window_hours(now), 0.75, places=3)
+
+    def test_a_long_outage_widens_the_window_up_to_the_ceiling(self):
+        now = datetime.now(timezone.utc)
+        self.mark(now - timedelta(hours=4))
+        self.assertAlmostEqual(cron.window_hours(now), 4.25, places=3)
+        self.mark(now - timedelta(days=3))          # longer than the ceiling
+        self.assertEqual(cron.window_hours(now), cron.WINDOW_HOURS)
+
+    def test_back_to_back_runs_still_scan_the_floor(self):
+        now = datetime.now(timezone.utc)
+        self.mark(now - timedelta(seconds=5))
+        self.assertGreaterEqual(cron.window_hours(now), cron.WINDOW_MIN_HOURS)
+
+    def test_a_future_or_unreadable_watermark_falls_back_to_the_ceiling(self):
+        now = datetime.now(timezone.utc)
+        self.mark(now + timedelta(hours=2))          # clock moved backwards
+        self.assertEqual(cron.window_hours(now), cron.WINDOW_HOURS)
+        cron.save_json(cron.WATERMARK, {'last_success': 'not a timestamp'})
+        self.assertEqual(cron.window_hours(now), cron.WINDOW_HOURS)
+        self.assertIn('unparseable watermark', self.stderr())
+        cron.save_json(cron.WATERMARK, {})
+        self.assertEqual(cron.window_hours(now), cron.WINDOW_HOURS)
+
+    def test_window_label(self):
+        self.assertEqual(cron.window_label(0.75), '45m')
+        self.assertEqual(cron.window_label(24), '24h')
+        self.assertEqual(cron.window_label(3.5), '3.5h')
+
+    def test_the_footer_names_the_window_actually_scanned(self):
+        p = cron.build_payload([{'user': 'a', 'email': 'a@x', 'ip': '1.1.1.1',
+                                 'vpn_operator': 'KASM_VDI', 'source': 'slack'}], hours=0.75)
+        self.assertIn('Last 45m window', p['blocks'][-1]['elements'][0]['text'])
 
 
 if __name__ == '__main__':

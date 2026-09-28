@@ -142,9 +142,20 @@ as findings. `--no-okta` skips the source. Okta identities are internal, so the 
 
 ### Slack alert cron (`slack_alert_cron.py`)
 
-Runs the detector over the last day and posts only *new* findings to a Slack incoming webhook;
-alerted `(user, IP, operator, source)` keys are kept in `.slack_alert_state.json`, so any
-cadence up to 24h works and a finding alerts once. A lock file stops overlapping runs.
+Runs the detector and posts only *new* findings to a Slack incoming webhook; alerted
+`(user, IP, operator, source)` keys are kept in `.slack_alert_state.json`, so any cadence up
+to 24h works and a finding alerts once. A lock file stops overlapping runs.
+
+Each run scans back to `.slack_alert_watermark.json` — the start time of the last run that
+finished with no failures — less a 15 minute overlap, capped at 24h. On a 30 minute cadence
+that is a 45 minute window instead of a full day, which matters because Slack's access log is
+rate limited and the page count, not the data, is what makes a run slow: 29 pages become 2.
+A run with any failure leaves the watermark alone, so the next run re-covers its window, and
+a long outage widens the window automatically until it reaches the ceiling. Delete the file
+to force a full 24h scan.
+
+Zoom is the exception: its Dashboard API takes `from`/`to` as whole dates, so a sub-day
+window still lists the whole day's meetings.
 
 ```bash
 */30 * * * * cd /path/to/repo && venv/bin/python slack_alert_cron.py >> anomaly_cron.log 2>&1

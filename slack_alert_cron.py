@@ -24,6 +24,12 @@ State files (all mode 0600, flat sorted JSON lists):
     .slack_alert_state.json    "email|ip|operator|source" already posted to Slack
     .teamtailor_noted.json     "account:candidate_id" already flagged with the security note
     .teamtailor_ai_noted.json  "account:application_id" already given the AI-tool info note
+    .slack_alert_watermark.json  start time of the last run that finished with no failures
+
+Each run scans back to that watermark rather than a fixed 24h: every source re-fetching a
+whole day every 30 minutes is 48x redundant, and Slack's access log is rate limited, so the
+pages dominate the run. A run with any failure leaves the watermark alone, so the next run
+re-covers its window; a long outage widens the window until it reaches the 24h ceiling.
 """
 
 import argparse
@@ -51,6 +57,7 @@ STATE = os.path.join(REPO, '.slack_alert_state.json')
 NOTED = os.path.join(REPO, '.teamtailor_noted.json')
 AI_NOTED = os.path.join(REPO, '.teamtailor_ai_noted.json')
 LOCK = os.path.join(REPO, '.slack_alert_cron.lock')
+WATERMARK = os.path.join(REPO, '.slack_alert_watermark.json')
 TT_API = 'https://api.teamtailor.com/v1'
 TT_NOTE = ('<p>Security flag: identified as a possible DPRK (North Korean) IT worker.</p>'
            '<p>Do not progress or engage with this candidate.</p>'
@@ -62,7 +69,9 @@ RECRUITER_FOOTER = '<p><em>Automated note from team.blue Security (emil.stahl@te
 AI_TOOLS = {'jackandjill': 'Jack & Jill', 'hirify': 'Hirify', 'jobright': 'Jobright', 'simplify': 'Simplify',
             'scale.jobs': 'Scale.jobs', 'perplexity': 'Perplexity', 'chatgpt': 'ChatGPT'}
 
-WINDOW_HOURS = 24
+WINDOW_HOURS = 24           # ceiling on the scan window, and the window when there is no watermark
+WINDOW_OVERLAP_MIN = 15     # re-scan this far before the last success so nothing falls through the seam
+WINDOW_MIN_HOURS = 0.25     # floor, for two runs in quick succession
 DETECTOR_TIMEOUT = 25 * 60  # seconds; must finish inside the 30-minute cron period
 SLACK_SECTION_MAX = 3000    # Block Kit: section text limit (400 if exceeded)
 SLACK_MAX_BLOCKS = 50       # Block Kit: blocks per message
@@ -149,6 +158,31 @@ def retry_delay(response, attempt, cap=60):
         if value.isdecimal():
             return min(cap, int(value))
     return min(cap, 2 ** attempt)
+
+
+def window_hours(now):
+    """Hours to scan: back to the last clean run, less an overlap, capped at WINDOW_HOURS.
+
+    No watermark, a stale one, or one in the future (clock change) all fall back to the
+    full ceiling, which is what the job did before watermarks existed."""
+    mark = load_json(WATERMARK, {})
+    raw = mark.get('last_success') if isinstance(mark, dict) else None
+    try:
+        last = parse_ts(raw) if raw else None
+    except (TypeError, ValueError):
+        warn(f"unparseable watermark {raw!r}; scanning the full {WINDOW_HOURS}h window")
+        last = None
+    if not last or last > now:
+        return WINDOW_HOURS
+    hours = (now - last).total_seconds() / 3600 + WINDOW_OVERLAP_MIN / 60
+    return min(WINDOW_HOURS, max(WINDOW_MIN_HOURS, hours))
+
+
+def window_label(hours):
+    """'45m' / '3.5h' / '24h' for the message footer."""
+    if hours < 1:
+        return f"{round(hours * 60)}m"
+    return f"{hours:.1f}".rstrip('0').rstrip('.') + 'h'
 
 
 def load_env():
@@ -595,7 +629,7 @@ def clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
-def build_payload(new):
+def build_payload(new, hours=WINDOW_HOURS):
     """Slack Block Kit message: header, one or more sections per source, context footer."""
     def op_name(a):
         return mrkdwn((a.get('vpn_operator') or 'Unknown').replace('_', ' ').title())
@@ -669,7 +703,7 @@ def build_payload(new):
     blocks += [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': s}} for s in sections]
     blocks.append({'type': 'context', 'elements': [{
         'type': 'mrkdwn',
-        'text': f"Last {WINDOW_HOURS}h window · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        'text': f"Last {window_label(hours)} window · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     }]})
 
     fallback = clip(f"{len(new)} new VPN/proxy detection(s): " + ", ".join(
@@ -711,14 +745,13 @@ def tail(text, n=2000):
     return (text or '')[-n:]
 
 
-def run_detector(output=None):
+def run_detector(output=None, hours=WINDOW_HOURS):
     """Extract the window from every source and write the report. Returns the elapsed seconds.
 
     Exits 1 on failure or timeout. The detector deliberately exits 0 when one source fails
     (it prints the failure to stderr), so its stderr is forwarded and counted here."""
-    days = str(max(1, -(-WINDOW_HOURS // 24)))
     cmd = [sys.executable, 'anomaly_detector.py', '--enrichment', 'file',
-           '--ip-file', 'data.csv', '--days', days, '--output', output or REPORT]
+           '--ip-file', 'data.csv', '--hours', f"{hours:.4f}", '--output', output or REPORT]
     t0 = time.monotonic()
     try:
         proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=DETECTOR_TIMEOUT)
@@ -744,23 +777,29 @@ def main():
 
     load_env()
     webhook = check_config(args.dry_run)
+    started = datetime.now(timezone.utc)  # the watermark, so events during the run are not skipped
     if args.dry_run and args.report:
-        run(args, webhook)  # replaying a file touches nothing shared
+        run(args, webhook, started)  # replaying a file touches nothing shared
     else:
         lock_fd = acquire_lock()  # a live dry run still runs the detector and the scan
         try:
-            run(args, webhook)
+            run(args, webhook, started)
         finally:
             release_lock(lock_fd)
+    if not FAILURES and args.report is None and not args.dry_run:
+        # Only a run that did all its work moves the mark; a failed one is re-covered next time.
+        save_json(WATERMARK, {'last_success': started.isoformat()})
     if FAILURES:
         warn(f"{len(FAILURES)} non-fatal failure(s) this run (see above); exiting 1 so the healthcheck notices")
         sys.exit(1)
 
 
-def run(args, webhook):
+def run(args, webhook, started=None):
     live = args.report is None
+    started = started or datetime.now(timezone.utc)
+    hours = window_hours(started) if live else WINDOW_HOURS
     report_path = args.report or (DRY_RUN_REPORT if args.dry_run else REPORT)  # a preview never clobbers the cron's report
-    elapsed = run_detector(report_path) if live else None
+    elapsed = run_detector(report_path, hours) if live else None
     with open(report_path) as f:
         report = json.load(f)
     anomalies = report['anomalies']
@@ -769,10 +808,10 @@ def run(args, webhook):
                       (('slack', 'slack_entries'), ('zoom', 'zoom_entries'),
                        ('teamtailor', 'teamtailor_entries'), ('okta', 'okta_entries'))
                       if key in s)
-    log((f"detector {elapsed:.0f}s" if live else f"report {args.report}")
+    log((f"detector {elapsed:.0f}s window {window_label(hours)}" if live else f"report {args.report}")
         + f": {counts} anomalies {len(anomalies)}")
     if live:
-        bare, ai = referrer_findings()
+        bare, ai = referrer_findings(hours)
         anomalies += bare
         post_ai_notes(ai, dry_run=args.dry_run)
     anomalies = [a for a in anomalies if not whitelisted(a)]
@@ -786,7 +825,7 @@ def run(args, webhook):
 
     add_teamtailor_emails(new)  # read-only lookups, fine in a dry run too
     post_teamtailor_notes(new, dry_run=args.dry_run)
-    payload = build_payload(new)
+    payload = build_payload(new, hours)
 
     if args.dry_run:
         log(f"dry run: {len(new)} new finding(s); Slack payload follows (nothing posted, state untouched)")

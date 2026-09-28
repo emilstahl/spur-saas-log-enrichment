@@ -247,6 +247,9 @@ Examples:
                         help='Skip Okta even if OKTA_ORG_URL and OKTA_API_TOKEN are set')
     parser.add_argument('--days', type=int, default=30,
                         help='Number of days to analyze (default: 30)')
+    parser.add_argument('--hours', type=float,
+                        help='Window in hours, overriding --days; fractions allowed. The cron '
+                             'wrapper passes the gap back to its last clean run.')
 
     # Enrichment arguments
     parser.add_argument('--enrichment', choices=['spur', 'file'], required=True,
@@ -264,6 +267,10 @@ Examples:
                         help='Directory for reports (default: reports)')
 
     args = parser.parse_args()
+    if args.hours is not None and args.hours <= 0:
+        parser.error("--hours must be positive")
+    # Extractors take a day count; a float is fine, they all build a timedelta from it.
+    days = args.hours / 24 if args.hours is not None else args.days
 
     # Validate arguments
     tt_keys = {} if args.no_teamtailor else teamtailor_keys()
@@ -305,7 +312,7 @@ Examples:
                     executor.submit(
                         detector.extract_slack_data,
                         args.slack_token,
-                        args.days
+                        days
                     )
                 )
 
@@ -316,17 +323,17 @@ Examples:
                         args.zoom_account_id,
                         args.zoom_client_id,
                         args.zoom_client_secret,
-                        args.days
+                        days
                     )
                 )
 
             for account, key in tt_keys.items():
                 futures.append(executor.submit(
-                    detector.extract_teamtailor_data, key, account, args.days))
+                    detector.extract_teamtailor_data, key, account, days))
 
             if use_okta:
                 futures.append(executor.submit(
-                    detector.extract_okta_data, args.okta_org_url, args.okta_token, args.days))
+                    detector.extract_okta_data, args.okta_org_url, args.okta_token, days))
 
             # File enrichment is a cheap local lookup, so write an interim
             # report as each source finishes instead of waiting for both.
