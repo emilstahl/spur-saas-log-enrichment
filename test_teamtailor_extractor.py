@@ -1,4 +1,5 @@
-"""Offline self-check for the Teamtailor extractor: mocks HTTP, verifies filtering, dedup, cutoff, 5xx retry.
+"""Offline self-check for the Teamtailor extractor: mocks HTTP, verifies filtering, dedup,
+cutoff, 5xx retry, read-timeout retry and the rate-limit backoff headers.
 
 Run: python test_teamtailor_extractor.py
 """
@@ -6,7 +7,9 @@ Run: python test_teamtailor_extractor.py
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from extractors.teamtailor_extractor import TeamtailorExtractor
+import requests
+
+from extractors.teamtailor_extractor import TeamtailorExtractor, retry_delay
 
 
 def resp(json_data, status_code=200):
@@ -65,5 +68,59 @@ def test_teamtailor():
     print('teamtailor ok')
 
 
+def test_read_timeout_is_retried():
+    """A stalled page costs a retry, not the whole workspace (the cause of the 28 Sept pages)."""
+    attempts = []
+
+    def fake_get(url, params=None, timeout=None):
+        attempts.append(url)
+        if url.endswith('/company'):
+            return resp({'data': {'id': 'ABC'}})
+        if len(attempts) < 4:  # company, then two stalled audit-events reads
+            raise requests.exceptions.ReadTimeout('Read timed out. (read timeout=30)')
+        return resp({'data': [event(1, '1.1.1.1', 1)], 'links': {}})
+
+    ex = TeamtailorExtractor('key', account='global')
+    with patch.object(ex.session, 'get', side_effect=fake_get), patch('time.sleep'):
+        logs = ex.extract_ip_logs(days=1)
+
+    assert [l['ip'] for l in logs] == ['1.1.1.1'], logs
+    assert len(attempts) == 4, attempts
+
+
+def test_read_timeout_gives_up_with_the_url():
+    """Past the timeout budget it still fails, naming the endpoint that stalled."""
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith('/company'):
+            return resp({'data': {'id': 'ABC'}})
+        raise requests.exceptions.ReadTimeout('Read timed out. (read timeout=30)')
+
+    ex = TeamtailorExtractor('key', account='global')
+    with patch.object(ex.session, 'get', side_effect=fake_get), patch('time.sleep'):
+        try:
+            ex.extract_ip_logs(days=1)
+        except requests.RequestException as e:
+            assert 'audit-events' in str(e) and 'ReadTimeout' in str(e), e
+        else:
+            raise AssertionError('a permanent timeout should still fail the workspace')
+
+
+def test_retry_delay_headers():
+    """Teamtailor documents X-Rate-Limit-Reset (seconds left), not Retry-After."""
+    def r(headers):
+        m = Mock()
+        m.headers = headers
+        return m
+
+    assert retry_delay(r({'X-Rate-Limit-Reset': '7'}), 0) == 7
+    assert retry_delay(r({'Retry-After': '3'}), 0) == 3        # still honoured if sent
+    assert retry_delay(r({}), 3) == 8                          # exponential fallback
+    assert retry_delay(r({'X-Rate-Limit-Reset': '900'}), 0) == 60   # capped
+    assert retry_delay(r({'X-Rate-Limit-Reset': 'soon'}), 2) == 4   # unparseable -> fallback
+
+
 if __name__ == '__main__':
     test_teamtailor()
+    test_read_timeout_is_retried()
+    test_read_timeout_gives_up_with_the_url()
+    test_retry_delay_headers()

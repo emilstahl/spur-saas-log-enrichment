@@ -7,10 +7,24 @@ from typing import Dict, List
 import requests
 
 
+def retry_delay(response, attempt, cap: int = 60) -> int:
+    """Seconds to wait before retrying `response`.
+
+    Teamtailor documents X-Rate-Limit-Reset (seconds left in the 50-requests-per-10s
+    bucket) rather than Retry-After, so honour both before falling back to backoff."""
+    for header in ('Retry-After', 'X-Rate-Limit-Reset'):
+        value = (response.headers.get(header) or '').strip()
+        if value.isdecimal():
+            return min(cap, int(value))
+    return min(cap, 2 ** attempt)
+
+
 class TeamtailorExtractor:
     """Extract applicant IPs from the Teamtailor audit log (/v1/audit-events)."""
 
     BASE_URL = "https://api.teamtailor.com/v1"
+    TIMEOUT = 30            # seconds to wait for a response
+    TIMEOUT_RETRIES = 2     # extra attempts for a stalled request, budgeted apart from 429/5xx
 
     def __init__(self, api_key: str, account: str = 'global'):
         self.account = account
@@ -22,11 +36,28 @@ class TeamtailorExtractor:
         })
 
     def _get(self, url: str, params: Dict = None, max_retries: int = 5) -> Dict:
-        # audit-events returns sporadic 500s; retry those and 429s with backoff
-        for attempt in range(max_retries + 1):
-            r = self.session.get(url, params=params, timeout=30)
-            if (r.status_code == 429 or r.status_code >= 500) and attempt < max_retries:
-                time.sleep(int(r.headers.get('Retry-After') or 2 ** attempt))
+        """GET with backoff. Retries 429s, 5xx (audit-events returns sporadic 500s) and
+        stalled requests.
+
+        A read timeout used to escape to the caller, which aborts extract_ip_logs and
+        drops the whole workspace for that run; repeating a GET is safe, so it costs a
+        retry instead. The timeout budget is smaller than the 429/5xx one so a real
+        outage still fails the run rather than stalling it past the cron period.
+        """
+        retries = timeouts = 0
+        while True:
+            try:
+                r = self.session.get(url, params=params, timeout=self.TIMEOUT)
+            except (requests.Timeout, requests.ConnectionError) as e:
+                timeouts += 1
+                if timeouts > self.TIMEOUT_RETRIES:
+                    raise requests.RequestException(
+                        f"{type(e).__name__} on {url} after {timeouts} attempts") from e
+                time.sleep(2 ** (timeouts - 1))
+                continue
+            if (r.status_code == 429 or r.status_code >= 500) and retries < max_retries:
+                time.sleep(retry_delay(r, retries))
+                retries += 1
                 continue
             r.raise_for_status()
             return r.json()

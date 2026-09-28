@@ -350,6 +350,49 @@ class TestTeamtailorNotes(Base):
         self.assertIs(cron.tt_session('test'), cron.tt_session('test'))  # one keep-alive session per account
         self.assertIsNone(cron.tt_session('nokey'))
 
+    def test_tt_request_retries_a_stalled_get_but_never_a_post(self):
+        """A read timeout may have been delivered, so only an idempotent GET repeats it."""
+        timeout = cron.requests.exceptions.ReadTimeout('Read timed out. (read timeout=15)')
+        seq = iter([timeout, timeout, resp({'ok': 1})])
+
+        def handler(m, u, kw):
+            nxt = next(seq)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+        self.fake_session_request(handler)
+        r = cron.tt_request(cron.tt_session('test'), 'GET', API + '/x')
+        self.assertEqual(r.json(), {'ok': 1})
+        self.assertEqual(len(self.calls), 3)
+
+        self.calls.clear()
+        self.fake_session_request(lambda m, u, kw: (_ for _ in ()).throw(timeout))
+        with self.assertRaises(cron.requests.exceptions.ReadTimeout):
+            cron.tt_request(cron.tt_session('test'), 'POST', API + '/notes')
+        self.assertEqual(len(self.calls), 1)  # the note may already exist; next run retries it
+
+    def test_tt_request_retries_a_post_that_never_reached_the_server(self):
+        """A ConnectionError was never delivered, so repeating it cannot double-post."""
+        seq = iter([cron.requests.exceptions.ConnectionError('reset'), resp({'ok': 1})])
+
+        def handler(m, u, kw):
+            nxt = next(seq)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+        self.fake_session_request(handler)
+        r = cron.tt_request(cron.tt_session('test'), 'POST', API + '/notes')
+        self.assertEqual(r.json(), {'ok': 1})
+        self.assertEqual(len(self.calls), 2)
+
+    def test_retry_delay_honours_teamtailors_rate_limit_header(self):
+        self.assertEqual(cron.retry_delay(resp(headers={'X-Rate-Limit-Reset': '7'}), 0), 7)
+        self.assertEqual(cron.retry_delay(resp(headers={'Retry-After': '3'}), 0), 3)
+        self.assertEqual(cron.retry_delay(resp(headers={}), 3), 8)
+        self.assertEqual(cron.retry_delay(resp(headers={'X-Rate-Limit-Reset': '900'}), 0), 60)
+
     def test_add_teamtailor_emails(self):
         def handler(m, u, kw):
             if u.endswith('/candidates/7'):

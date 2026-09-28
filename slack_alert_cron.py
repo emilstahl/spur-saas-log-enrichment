@@ -139,8 +139,13 @@ def release_lock(fd):
 
 
 def retry_delay(response, attempt, cap=60):
-    ra = (response.headers.get('Retry-After') or '').strip()
-    return min(cap, int(ra) if ra.isdecimal() else 2 ** attempt)
+    """Seconds to wait before retrying. Slack sends Retry-After; Teamtailor documents
+    X-Rate-Limit-Reset (seconds left in the 50-requests-per-10s bucket) instead."""
+    for header in ('Retry-After', 'X-Rate-Limit-Reset'):
+        value = (response.headers.get(header) or '').strip()
+        if value.isdecimal():
+            return min(cap, int(value))
+    return min(cap, 2 ** attempt)
 
 
 def load_env():
@@ -197,17 +202,30 @@ def tt_session(account):
     return s
 
 
-def tt_request(session, method, url, retries=3, **kw):
-    """One Teamtailor call. Retries 429 (honouring Retry-After) and, for GET only, 5xx.
+def tt_request(session, method, url, retries=3, timeout_retries=2, **kw):
+    """One Teamtailor call. Retries 429 (honouring X-Rate-Limit-Reset/Retry-After) and, for
+    GET only, 5xx and a stalled request.
 
-    POSTs are not retried on 5xx: the note may already have been created, and a
-    missed note is retried on the next run anyway (it is not in the noted set)."""
+    POSTs are not retried on 5xx or a read timeout: the note may already have been created,
+    and a missed note is retried on the next run anyway (it is not in the noted set). A
+    ConnectionError never reached the server, so it is safe to repeat for any method."""
     kw.setdefault('timeout', 15)
-    for attempt in range(retries + 1):
-        r = session.request(method, url, **kw)
+    retried = timeouts = 0
+    while True:
+        try:
+            r = session.request(method, url, **kw)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            # ConnectTimeout subclasses both, and like any ConnectionError never delivered.
+            safe = isinstance(e, requests.ConnectionError) or method == 'GET'
+            timeouts += 1
+            if not safe or timeouts > timeout_retries:
+                raise
+            time.sleep(2 ** (timeouts - 1))
+            continue
         transient = r.status_code == 429 or (method == 'GET' and r.status_code >= 500)
-        if transient and attempt < retries:
-            time.sleep(retry_delay(r, attempt))
+        if transient and retried < retries:
+            time.sleep(retry_delay(r, retried))
+            retried += 1
             continue
         r.raise_for_status()
         return r
