@@ -91,9 +91,13 @@ engineer. Five pages in one afternoon.
    `filter[...]` on the timestamp be cheaper server side than sorting and paging from the newest
    event until we reach our own cutoff? We would happily switch if there is a documented filter
    for that endpoint.
-3. Would you like request IDs? Our client did not log the response headers for the *successful*
-   requests around those windows, and by definition the failed ones returned no headers at all.
-   We have since started logging them, so we can supply request IDs for the next occurrence.
+3. We cannot give you an `x-request-id` for the failures: a stalled request returns no
+   response and therefore no headers, and at the time we were not recording the ids of the
+   *successful* calls either. We have since changed the client to remember the last answered
+   `x-request-id` per workspace session and to quote it when the next request stalls, so from
+   now on we can hand you the id of the call immediately preceding each timeout. Tell us if
+   there is something more useful to capture — we can add response headers, timing, or a
+   packet capture.
 4. Is there a recommended client timeout for this endpoint? We use 30 seconds; if p99 is
    genuinely higher than that, we would rather raise ours than retry.
 

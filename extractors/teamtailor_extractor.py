@@ -28,6 +28,7 @@ class TeamtailorExtractor:
 
     def __init__(self, api_key: str, account: str = 'global'):
         self.account = account
+        self.last_request_id = None  # anchor for a support ticket: a stall returns no headers
         self.session = requests.Session()
         self.session.headers.update({
             'Authorization': f'Token token={api_key}',
@@ -51,10 +52,15 @@ class TeamtailorExtractor:
             except (requests.Timeout, requests.ConnectionError) as e:
                 timeouts += 1
                 if timeouts > self.TIMEOUT_RETRIES:
+                    # A stalled request has no response and so no x-request-id of its own;
+                    # the id of the last answered call is what Teamtailor support can trace.
+                    seen = (f"; last answered x-request-id {self.last_request_id}"
+                            if self.last_request_id else "")
                     raise requests.RequestException(
-                        f"{type(e).__name__} on {url} after {timeouts} attempts") from e
+                        f"{type(e).__name__} on {url} after {timeouts} attempts{seen}") from e
                 time.sleep(2 ** (timeouts - 1))
                 continue
+            self.last_request_id = r.headers.get('x-request-id') or self.last_request_id
             if (r.status_code == 429 or r.status_code >= 500) and retries < max_retries:
                 time.sleep(retry_delay(r, retries))
                 retries += 1

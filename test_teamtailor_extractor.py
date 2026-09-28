@@ -12,10 +12,10 @@ import requests
 from extractors.teamtailor_extractor import TeamtailorExtractor, retry_delay
 
 
-def resp(json_data, status_code=200):
+def resp(json_data, status_code=200, headers=None):
     r = Mock()
     r.status_code = status_code
-    r.headers = {}
+    r.headers = headers or {}
     r.json.return_value = json_data
     r.raise_for_status = Mock()
     return r
@@ -92,7 +92,7 @@ def test_read_timeout_gives_up_with_the_url():
     """Past the timeout budget it still fails, naming the endpoint that stalled."""
     def fake_get(url, params=None, timeout=None):
         if url.endswith('/company'):
-            return resp({'data': {'id': 'ABC'}})
+            return resp({'data': {'id': 'ABC'}}, headers={'x-request-id': 'req-42'})
         raise requests.exceptions.ReadTimeout('Read timed out. (read timeout=30)')
 
     ex = TeamtailorExtractor('key', account='global')
@@ -101,6 +101,8 @@ def test_read_timeout_gives_up_with_the_url():
             ex.extract_ip_logs(days=1)
         except requests.RequestException as e:
             assert 'audit-events' in str(e) and 'ReadTimeout' in str(e), e
+            # the stall itself has no headers, so report the last call Teamtailor did answer
+            assert 'req-42' in str(e), e
         else:
             raise AssertionError('a permanent timeout should still fail the workspace')
 
