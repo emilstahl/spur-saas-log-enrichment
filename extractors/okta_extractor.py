@@ -119,7 +119,10 @@ class OktaExtractor:
                 if key in seen:
                     continue
                 seen.add(key)
-                agent = (ev.get('client') or {}).get('userAgent') or {}
+                client = ev.get('client') or {}
+                agent = client.get('userAgent') or {}
+                geo = client.get('geographicalContext') or {}
+                sec = ev.get('securityContext') or {}
                 logs.append({
                     'user': actor.get('displayName') or email,
                     'email': email,
@@ -129,6 +132,11 @@ class OktaExtractor:
                     'action': ev.get('eventType'),
                     'outcome': (ev.get('outcome') or {}).get('result'),
                     'user_agent': agent.get('rawUserAgent') or 'Unknown',
+                    # Okta's own verdict on the address. On this org it marked two orders of
+                    # magnitude more anonymising infrastructure than the IP watchlist did.
+                    'is_proxy': bool(sec.get('isProxy')),
+                    'country': geo.get('country'),
+                    'as_org': sec.get('asOrg'),
                 })
             url = (r.links.get('next') or {}).get('url')
         return logs

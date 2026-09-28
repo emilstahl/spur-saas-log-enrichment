@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
+import anomaly_detector
 import slack_alert_cron as cron
 
 API = 'https://api.teamtailor.com/v1'
@@ -165,12 +166,15 @@ class TestPayload(unittest.TestCase):
         new = [{'user': 'Bob', 'email': 'bob@team.blue', 'ip': '1.2.3.4', 'vpn_operator': 'ASTRILL_VPN',
                 'source': 'okta', 'action': 'user.session.start', 'outcome': 'SUCCESS'},
                {'user': 'Eve', 'email': 'eve@team.blue', 'ip': '5.6.7.8', 'vpn_operator': 'KASM_VDI',
-                'source': 'okta', 'action': 'policy.evaluate_sign_on', 'outcome': 'DENY'}]
+                'source': 'okta', 'action': 'policy.evaluate_sign_on', 'outcome': 'DENY',
+                'country': 'China', 'as_org': 'chinanet zhejiang province', 'is_proxy': True}]
         section = next(s for s in self.sections(cron.build_payload(new)) if 'Okta' in s)
         self.assertIn('🔐 *Okta sign-ins*', section)
         self.assertIn('*Bob* (bob@team.blue) — Astrill Vpn — `1.2.3.4` — _user.session.start_', section)
         self.assertNotIn('SUCCESS', section)      # an outcome that went through is not worth a word
         self.assertIn('*DENY*', section)          # a blocked sign-on is
+        self.assertIn('China / chinanet zhejiang province', section)  # where, not just which IP
+        self.assertIn('_okta: proxy_', section)   # the vendor's own anonymising-infra verdict
         self.assertNotIn('❓ *Other*', section)  # okta is a first-class source now
 
     def test_singular_header_and_grouping(self):
@@ -238,11 +242,14 @@ class TestState(Base):
 
 
 class TestLoadEnv(unittest.TestCase):
+    """load_env lives in anomaly_detector so the detector can be run on its own; the cron
+    imports it from there, which is why REPO is patched on that module."""
+
     def test_real_environment_wins_and_export_prefix_is_tolerated(self):
         repo = tempfile.mkdtemp()
         with open(os.path.join(repo, '.env'), 'w') as f:
             f.write('# comment\nA_TEST_KEY="quoted"\nB_TEST_KEY=plain=with=equals\nexport C_TEST_KEY=exported\nbroken line\n')
-        with patch.object(cron, 'REPO', repo), patch.dict(os.environ, {'A_TEST_KEY': 'real'}):
+        with patch.object(anomaly_detector, 'REPO', repo), patch.dict(os.environ, {'A_TEST_KEY': 'real'}):
             for k in ('B_TEST_KEY', 'C_TEST_KEY'):
                 os.environ.pop(k, None)
             cron.load_env()
@@ -250,7 +257,7 @@ class TestLoadEnv(unittest.TestCase):
             self.assertEqual(os.environ['B_TEST_KEY'], 'plain=with=equals')
             self.assertEqual(os.environ['C_TEST_KEY'], 'exported')
             self.assertNotIn('export C_TEST_KEY', os.environ)
-        with patch.object(cron, 'REPO', os.path.join(repo, 'nowhere')):
+        with patch.object(anomaly_detector, 'REPO', os.path.join(repo, 'nowhere')):
             cron.load_env()  # missing .env is fine
 
 

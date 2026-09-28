@@ -47,7 +47,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from anomaly_detector import teamtailor_keys
+from anomaly_detector import load_env, teamtailor_keys
 
 # Service identities that are never a person, so safe to keep in source.
 DEFAULT_WHITELIST = frozenset({'jirabot', 'system@okta.com'})
@@ -185,21 +185,6 @@ def window_label(hours):
     if hours < 1:
         return f"{round(hours * 60)}m"
     return f"{hours:.1f}".rstrip('0').rstrip('.') + 'h'
-
-
-def load_env():
-    """Load KEY=VALUE lines from .env (an `export ` prefix is tolerated); real environment variables win."""
-    path = os.path.join(REPO, '.env')
-    if not os.path.exists(path):
-        return
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith('export '):
-                line = line[len('export '):].lstrip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def check_config(dry_run):
@@ -693,13 +678,18 @@ def build_payload(new, hours=WINDOW_HOURS):
                 f"{mrkdwn(a.get('account'))} — _{mrkdwn(a.get('tt_note', ''))}_{jobs}")
 
     tt_lines = [tt_line(a) for a in new if a.get('source') == 'teamtailor']
-    okta_lines = [
-        f"• {who(a)} — {op_name(a)} — `{mrkdwn(a.get('ip'))}`"
-        + (f" — _{mrkdwn(a['action'])}_" if a.get('action') else "")
-        + (f" — *{mrkdwn(a['outcome'])}*"
-           if a.get('outcome') and a['outcome'] not in OKTA_OK_OUTCOMES else "")
-        for a in new if a.get('source') == 'okta'
-    ]
+    def okta_line(a):
+        # Country and network carry most of the triage value: "Astrill from China" is a
+        # different conversation from the same operator seen at a known office range.
+        where = ' / '.join(x for x in (a.get('country'), a.get('as_org')) if x)
+        return (f"• {who(a)} — {op_name(a)} — `{mrkdwn(a.get('ip'))}`"
+                + (f" — {clip(mrkdwn(where), 120)}" if where else "")
+                + (f" — _{mrkdwn(a['action'])}_" if a.get('action') else "")
+                + (f" — *{mrkdwn(a['outcome'])}*"
+                   if a.get('outcome') and a['outcome'] not in OKTA_OK_OUTCOMES else "")
+                + (" — _okta: proxy_" if a.get('is_proxy') else ""))
+
+    okta_lines = [okta_line(a) for a in new if a.get('source') == 'okta']
     other_lines = [  # safety net for a source the detector may grow later
         f"• {who(a)} — {op_name(a)} — `{mrkdwn(a.get('ip'))}` — {mrkdwn(a.get('source', '?'))}"
         for a in new if a.get('source') not in ('slack', 'zoom', 'teamtailor', 'okta')

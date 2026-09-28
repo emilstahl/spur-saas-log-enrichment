@@ -19,6 +19,23 @@ from extractors.teamtailor_extractor import TeamtailorExtractor
 from extractors.okta_extractor import OktaExtractor
 
 TEAMTAILOR_KEY_PREFIX = 'TEAMTAILOR_API_KEY_'
+OKTA_PROXY_TAG = 'OKTA_FLAGGED_PROXY'
+REPO = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_env():
+    """Load KEY=VALUE lines from .env (an `export ` prefix is tolerated); real environment variables win."""
+    path = os.path.join(REPO, '.env')
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('export '):
+                line = line[len('export '):].lstrip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def teamtailor_keys() -> Dict[str, str]:
@@ -45,6 +62,7 @@ class AnomalyDetector:
         self.teamtailor_data = []
         self.okta_data = []
         self.anomalies = []
+        self._file_enricher = None
 
     def extract_teamtailor_data(self, api_key: str, account: str, days: int = 30) -> List[Dict]:
         """Extract applicant IPs from Teamtailor. Failures are logged, not raised, so Slack/Zoom still run."""
@@ -103,11 +121,46 @@ class AnomalyDetector:
     def enrich_with_file(self, filepath: str) -> List[Dict]:
         """Enrich IP data using a file containing suspicious IP addresses."""
         print(f"🔍 Enriching data with IP list from {filepath}...")
-        enricher = FileEnrichment(filepath)
-        self.anomalies = enricher.enrich_and_detect(self._all_data())
+        # Built once and reused: file enrichment reruns after every source finishes, and
+        # reparsing a 60k-row watchlist ~40 times costs more CPU than the extraction does.
+        # Reusing it also keeps the per-address lookup cache warm across sources.
+        if self._file_enricher is None or self._file_enricher.filepath != filepath:
+            self._file_enricher = FileEnrichment(filepath)
+        enricher = self._file_enricher
+        entries = self._all_data()
+        self.anomalies = enricher.enrich_and_detect(entries)
         print(
             f"⚠️  Found {len(self.anomalies)} anomalies (matched suspicious IPs)")
+        self.anomalies += self._okta_proxy_anomalies(entries, enricher)
         return self.anomalies
+
+    @staticmethod
+    def _okta_proxy_anomalies(entries: List[Dict], enricher) -> List[Dict]:
+        """Okta's own isProxy verdict, as findings. Opt in with OKTA_ALERT_ON_PROXY=1.
+
+        Off by default because enabling it on an org that routes a business unit through a
+        shared VPN gateway produces a burst. It is worth having: on this org the address
+        watchlist matched a single (user, IP) pair in 24,784 while isProxy marked 270, so
+        the vendor sees anonymising infrastructure that a list of literal addresses cannot.
+        Entries already flagged by the watchlist are left alone rather than duplicated."""
+        if (os.environ.get('OKTA_ALERT_ON_PROXY') or '').strip().lower() not in ('1', 'true', 'yes'):
+            return []
+        found = []
+        for entry in entries:
+            if entry.get('source') != 'okta' or not entry.get('is_proxy'):
+                continue
+            if entry.get('ip') and enricher.lookup(entry['ip']):
+                continue  # already reported as a watchlist hit
+            found.append({
+                **entry,
+                'vpn_operator': entry.get('as_org') or OKTA_PROXY_TAG,
+                'enrichment': {'ip': entry.get('ip'), 'matched': True,
+                               'source': 'okta_is_proxy', 'operator': OKTA_PROXY_TAG},
+                'anomaly_type': 'Anonymising infrastructure (Okta isProxy)',
+                'risk_score': 60,  # a vendor heuristic, not a curated watchlist hit
+            })
+        print(f"⚠️  Found {len(found)} Okta isProxy anomalies")
+        return found
 
     def generate_report(self, output_file: str = None):
         """Generate a detailed report of findings."""
@@ -210,6 +263,10 @@ class AnomalyDetector:
 
 
 def main():
+    # Before the parser: every credential argument defaults from os.environ, so the .env
+    # values have to be in place by the time add_argument runs. Without this the detector
+    # only worked as a subprocess of slack_alert_cron.py, which loaded .env on its behalf.
+    load_env()
     parser = argparse.ArgumentParser(
         description='Detect IP anomalies in Slack, Zoom, Teamtailor and Okta logs',
         formatter_class=argparse.RawDescriptionHelpFormatter,

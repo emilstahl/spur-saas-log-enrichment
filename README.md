@@ -99,6 +99,34 @@ Every VPN/proxy match in the report is shown in the CLI summary and counted as c
 watchlist (Spur's operator classification, or your `--ip-file`) is the place to curate what
 counts. Operator names come from `tunnels.operator` in `reports/enrichment_report_YYYYMMDD.json`.
 
+The `ip` column takes a single address or a CIDR range, and the most specific entry wins, so
+a `/32` carve-out beats the `/16` it sits inside:
+
+```csv
+ip,operator
+198.51.100.7,ASTRILL_VPN
+192.0.2.0/24,SOME_HOSTING_RANGE
+2001:db8::/32,SOME_V6_RANGE
+```
+
+Ranges matter more than they look: on a 4,000-user org an exact-address watchlist matched one
+`(user, IP)` pair in 24,784 while Okta's own `isProxy` flag marked 270. A malformed row is
+skipped and counted rather than taking the whole watchlist down.
+
+### Alert whitelist
+
+`DEFAULT_WHITELIST` in `slack_alert_cron.py` holds service identities only. People go in
+`.alert_whitelist` (one entry per line, `#` comments, gitignored) or `ALERT_WHITELIST`
+(comma separated) — names or emails, matched case-insensitively:
+
+```bash
+echo "someone@example.com  # approved remote location" >> .alert_whitelist
+```
+
+Keeping them out of the repo matters: a committed whitelist publishes staff identities and
+tells any reader which accounts are unmonitored. Teamtailor findings ignore the whitelist
+entirely, since an applicant chooses their own name.
+
 ### Teamtailor (applicant IPs)
 
 The Teamtailor extractor reads the audit log (`/v1/audit-events`) and yields one entry per
@@ -135,6 +163,12 @@ echo "OKTA_EVENT_TYPES=user.session.start,user.account.lock" >> .env
 
 Each row keeps its `eventType` and `outcome`, so failed and denied attempts are
 distinguishable downstream; the Slack alert marks a non-success outcome as *auth failed*.
+
+Each row keeps Okta's own `securityContext.isProxy` verdict along with the country and AS
+org, and the alert prints them, because "Astrill from China" is a different conversation
+from the same operator at a known office range. Set `OKTA_ALERT_ON_PROXY=1` to alert on
+`isProxy` directly rather than only on watchlist hits — off by default, since an org that
+routes a business unit through a shared VPN gateway gets a burst on first enable.
 
 Only `actor.type == "User"` rows are kept, so API-token and application actors do not appear
 as findings. `--no-okta` skips the source. Okta identities are internal, so the cron's
@@ -222,6 +256,9 @@ All data is saved to `reports/`:
 - `enrichment_report_YYYYMMDD.json` - Full Spur API enrichment data for all IPs
 
 ## Command Line Options
+
+Credentials are read from `.env` next to the script, so the detector runs standalone with no
+environment setup.
 
 ```bash
 # Data Sources
