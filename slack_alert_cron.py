@@ -68,6 +68,9 @@ SLACK_SECTION_MAX = 3000    # Block Kit: section text limit (400 if exceeded)
 SLACK_MAX_BLOCKS = 50       # Block Kit: blocks per message
 SLACK_LINE_MAX = 2900       # one finding line; leaves room for the group title in the same section
 MAX_JOBS_SHOWN = 8          # job applications listed per Teamtailor candidate
+# Okta outcomes that mean the request went through; anything else (FAILURE, DENY, CHALLENGE,
+# ABANDONED, UNANSWERED) is worth showing next to the finding.
+OKTA_OK_OUTCOMES = ('SUCCESS', 'ALLOW')
 
 FAILURES = []  # non-fatal problems; a run that had any exits 1 after doing its work, so the healthcheck notices
 
@@ -169,6 +172,8 @@ def check_config(dry_run):
     if not webhook and not dry_run:
         warn("SLACK_WEBHOOK_URL is not set (env or .env); refusing to run")
         sys.exit(2)
+    if bool(os.environ.get('OKTA_ORG_URL')) != bool(os.environ.get('OKTA_API_TOKEN')):
+        warn("only one of OKTA_ORG_URL / OKTA_API_TOKEN is set; the Okta System Log check is disabled")
     if teamtailor_keys() and not (os.environ.get('TEAMTAILOR_NOTE_USER_ID') or os.environ.get('TEAMTAILOR_NOTE_USER_EMAIL')
                                   or any(k.startswith('TEAMTAILOR_NOTE_USER_ID_') for k in os.environ)):
         warn("TEAMTAILOR_NOTE_USER_ID is not set (nor TEAMTAILOR_NOTE_USER_EMAIL): Teamtailor profile notes are disabled")
@@ -623,15 +628,23 @@ def build_payload(new):
                 f"{mrkdwn(a.get('account'))} — _{mrkdwn(a.get('tt_note', ''))}_{jobs}")
 
     tt_lines = [tt_line(a) for a in new if a.get('source') == 'teamtailor']
+    okta_lines = [
+        f"• {who(a)} — {op_name(a)} — `{mrkdwn(a.get('ip'))}`"
+        + (f" — _{mrkdwn(a['action'])}_" if a.get('action') else "")
+        + (f" — *{mrkdwn(a['outcome'])}*"
+           if a.get('outcome') and a['outcome'] not in OKTA_OK_OUTCOMES else "")
+        for a in new if a.get('source') == 'okta'
+    ]
     other_lines = [  # safety net for a source the detector may grow later
         f"• {who(a)} — {op_name(a)} — `{mrkdwn(a.get('ip'))}` — {mrkdwn(a.get('source', '?'))}"
-        for a in new if a.get('source') not in ('slack', 'zoom', 'teamtailor')
+        for a in new if a.get('source') not in ('slack', 'zoom', 'teamtailor', 'okta')
     ]
 
     sections = []
     for title, lines in [("💬 *Slack logins*", slack_lines),
                          ("🎥 *Zoom meetings*", zoom_lines),
                          ("🧑‍💼 *Teamtailor applicants*", tt_lines),
+                         ("🔐 *Okta sign-ins*", okta_lines),
                          ("❓ *Other*", other_lines)]:
         if not lines:
             continue

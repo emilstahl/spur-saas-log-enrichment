@@ -1,11 +1,12 @@
 # SaaS IP Anomaly Detector
 
-Detect anonymous VPN tunnels and suspicious IP addresses in your Slack and Zoom logs. Perfect for security teams conducting audits, compliance checks, or investigating potential account compromises.
+Detect anonymous VPN tunnels and suspicious IP addresses in your Slack, Zoom, Teamtailor and Okta logs. Perfect for security teams conducting audits, compliance checks, or investigating potential account compromises.
 
 ## Features
 
 - **Slack Integration** - Extract IP logs from workspace access logs
 - **Zoom Integration** - Pull participant IP addresses from meetings
+- **Okta Integration** - Pull sign-in IPs from the Okta System Log
 - **Spur API** - Detect anonymous VPN tunnels/proxies
 - **Filtered Alerts** - Only display critical VPN/proxy operators on command line
 - **Full Reports** - Complete enrichment data saved to JSON reports
@@ -16,6 +17,7 @@ Detect anonymous VPN tunnels and suspicious IP addresses in your Slack and Zoom 
 - Python 3.7+
 - **Slack**: Paid plan (Standard/Plus/Enterprise Grid) with admin access
 - **Zoom**: Business or Business+ plan (Pro does NOT work)
+- **Okta**: API token with read access to the System Log (optional)
 - **Spur API**: Token from https://spur.us/ (optional)
 
 ## Quick Start
@@ -110,6 +112,34 @@ echo "TEAMTAILOR_API_KEY_DK=..." >> .env       # workspace "dk"
 Every `TEAMTAILOR_API_KEY_<WORKSPACE>` variable is picked up automatically; `--no-teamtailor`
 skips the source. The key needs read access to audit events and candidates (admin API key).
 
+### Okta (sign-in IPs)
+
+The Okta extractor reads the System Log (`/api/v1/logs`) and yields one entry per (user, IP).
+Set the org — a custom domain works as well as the `*.okta.com` one — and an API token, which
+is sent as `SSWS`:
+
+```bash
+echo "OKTA_ORG_URL=https://auth.example.com" >> .env
+echo "OKTA_API_TOKEN=..." >> .env
+```
+
+Every event type in the window is pulled. Filtering server side saved only about 6s of a
+32s pull on a 2000-user org while risking a blind spot — a sign-on denied by a network zone
+surfaces as `policy.evaluate_sign_on` with a DENY outcome, not as a login event — so the
+filter is opt-in. Narrow it with `OKTA_EVENT_TYPES` (comma separated) only if volume demands
+it; `*` or unset means everything:
+
+```bash
+echo "OKTA_EVENT_TYPES=user.session.start,user.account.lock" >> .env
+```
+
+Each row keeps its `eventType` and `outcome`, so failed and denied attempts are
+distinguishable downstream; the Slack alert marks a non-success outcome as *auth failed*.
+
+Only `actor.type == "User"` rows are kept, so API-token and application actors do not appear
+as findings. `--no-okta` skips the source. Okta identities are internal, so the cron's
+`WHITELIST` applies to them as it does to Slack and Zoom.
+
 ### Slack alert cron (`slack_alert_cron.py`)
 
 Runs the detector over the last day and posts only *new* findings to a Slack incoming webhook;
@@ -132,6 +162,8 @@ Credentials are read from `.env` next to the script (real environment variables 
 | `TEAMTAILOR_NOTE_USER_ID` | Author of profile notes (a user id in the workspace) |
 | `TEAMTAILOR_NOTE_USER_EMAIL` | Or: look the author up by email in each workspace |
 | `TEAMTAILOR_NOTE_USER_ID_<WORKSPACE>` | Per-workspace author override |
+| `OKTA_ORG_URL` / `OKTA_API_TOKEN` | Okta System Log source (both, or neither) |
+| `OKTA_EVENT_TYPES` | Narrow the pull to these event types (default: all) |
 
 Teamtailor user ids are per workspace. The author is resolved in that order; when nothing
 matches in a workspace, the note is posted as the recruiter (job owner) of the candidate's
@@ -188,6 +220,9 @@ All data is saved to `reports/`:
 --zoom-client-secret SECRET  Zoom Client Secret (required for Zoom)
 --days N                     Days to analyze (default: 30, Slack limited to 7 on most plans)
 --no-teamtailor              Skip Teamtailor even if TEAMTAILOR_API_KEY_<WORKSPACE> is set
+--okta-org-url URL           Okta org or custom domain (env: OKTA_ORG_URL)
+--okta-token TOKEN           Okta API token, sent as SSWS (env: OKTA_API_TOKEN)
+--no-okta                    Skip Okta even if OKTA_ORG_URL and OKTA_API_TOKEN are set
 
 # Enrichment Method (required)
 --enrichment spur            Use Spur API for VPN/proxy detection
@@ -208,7 +243,8 @@ saas-enrichment/
 ├── extractors/
 │   ├── slack_extractor.py    # Slack API integration
 │   ├── zoom_extractor.py     # Zoom API integration
-│   └── teamtailor_extractor.py  # Teamtailor ATS audit log (applicant IPs)
+│   ├── teamtailor_extractor.py  # Teamtailor ATS audit log (applicant IPs)
+│   └── okta_extractor.py     # Okta System Log (sign-in IPs)
 ├── enrichment/
 │   ├── spur_enrichment.py    # Spur API integration
 │   └── file_enrichment.py    # File-based IP matching
@@ -259,6 +295,11 @@ export SLACK_API_TOKEN="xoxp-xxx"
 - **Spur API**: 100 requests/second
 - **Slack API**: ~1 request/second (built-in rate limiting)
 - **Zoom API**: ~3 requests/second (built-in rate limiting)
+- **Teamtailor API**: 50 requests per 10 seconds per token; 429s honour `X-Rate-Limit-Reset`
+- **Okta API**: per-org System Log budget; 429s honour `X-Rate-Limit-Reset` (a Unix timestamp)
+
+Every extractor also retries a stalled request (read timeout or dropped connection) on a
+small separate budget, so one slow response costs a retry rather than the whole source.
 
 ## Performance Optimization
 

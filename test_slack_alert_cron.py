@@ -159,6 +159,18 @@ class TestPayload(unittest.TestCase):
         self.assertEqual(s.count('↳'), cron.MAX_JOBS_SHOWN + 1)
         self.assertIn(f'and {80 - cron.MAX_JOBS_SHOWN} more application(s)', s)
 
+    def test_okta_sign_ins_have_their_own_section(self):
+        new = [{'user': 'Bob', 'email': 'bob@team.blue', 'ip': '1.2.3.4', 'vpn_operator': 'ASTRILL_VPN',
+                'source': 'okta', 'action': 'user.session.start', 'outcome': 'SUCCESS'},
+               {'user': 'Eve', 'email': 'eve@team.blue', 'ip': '5.6.7.8', 'vpn_operator': 'KASM_VDI',
+                'source': 'okta', 'action': 'policy.evaluate_sign_on', 'outcome': 'DENY'}]
+        section = next(s for s in self.sections(cron.build_payload(new)) if 'Okta' in s)
+        self.assertIn('🔐 *Okta sign-ins*', section)
+        self.assertIn('*Bob* (bob@team.blue) — Astrill Vpn — `1.2.3.4` — _user.session.start_', section)
+        self.assertNotIn('SUCCESS', section)      # an outcome that went through is not worth a word
+        self.assertIn('*DENY*', section)          # a blocked sign-on is
+        self.assertNotIn('❓ *Other*', section)  # okta is a first-class source now
+
     def test_singular_header_and_grouping(self):
         p = cron.build_payload([{'user': 'a', 'email': 'a@x', 'ip': '1.1.1.1', 'vpn_operator': 'KASM_VDI', 'source': 'other'}])
         self.assertEqual(p['blocks'][0]['text']['text'], '🚨 1 new VPN/proxy detection')

@@ -16,6 +16,7 @@ from enrichment.file_enrichment import FileEnrichment
 from extractors.slack_extractor import SlackExtractor
 from extractors.zoom_extractor import ZoomExtractor
 from extractors.teamtailor_extractor import TeamtailorExtractor
+from extractors.okta_extractor import OktaExtractor
 
 TEAMTAILOR_KEY_PREFIX = 'TEAMTAILOR_API_KEY_'
 
@@ -26,6 +27,15 @@ def teamtailor_keys() -> Dict[str, str]:
             for k, v in os.environ.items() if k.startswith(TEAMTAILOR_KEY_PREFIX) and v}
 
 
+def okta_event_types() -> List[str]:
+    """Event types to pull, from OKTA_EVENT_TYPES (comma separated). Unset, or '*', means
+    every type: the filter is an optimisation, not a safety net, so it is opt-in."""
+    raw = (os.environ.get('OKTA_EVENT_TYPES') or '').strip()
+    if not raw or raw == '*':
+        return []
+    return [t.strip() for t in raw.split(',') if t.strip()]
+
+
 class AnomalyDetector:
     """Main class for detecting IP anomalies in SaaS logs."""
 
@@ -33,6 +43,7 @@ class AnomalyDetector:
         self.slack_data = []
         self.zoom_data = []
         self.teamtailor_data = []
+        self.okta_data = []
         self.anomalies = []
 
     def extract_teamtailor_data(self, api_key: str, account: str, days: int = 30) -> List[Dict]:
@@ -47,10 +58,24 @@ class AnomalyDetector:
         print(f"✅ Extracted {len(data)} Teamtailor ({account}) entries")
         return data
 
+    def extract_okta_data(self, org_url: str, api_token: str, days: int = 30) -> List[Dict]:
+        """Extract user IPs from the Okta System Log. Failures are logged, not raised, so the
+        other sources still run (the cron wrapper turns the logged failure into a non-zero exit)."""
+        print(f"\U0001f4e5 Extracting Okta data for the last {days} days...")
+        try:
+            data = OktaExtractor(org_url, api_token, okta_event_types()).extract_ip_logs(days)
+        except Exception as e:
+            print(f"   \u26a0\ufe0f  Okta extraction failed: {e}", file=sys.stderr)
+            return []
+        self.okta_data = data
+        print(f"\u2705 Extracted {len(data)} Okta entries")
+        return data
+
     def _all_data(self) -> List[Dict]:
         return ([{**e, 'source': 'slack'} for e in self.slack_data]
                 + [{**e, 'source': 'zoom'} for e in self.zoom_data]
-                + [{**e, 'source': 'teamtailor'} for e in self.teamtailor_data])
+                + [{**e, 'source': 'teamtailor'} for e in self.teamtailor_data]
+                + [{**e, 'source': 'okta'} for e in self.okta_data])
 
     def extract_slack_data(self, api_token: str, days: int = 30) -> List[Dict]:
         """Extract IP addresses and user data from Slack."""
@@ -92,6 +117,7 @@ class AnomalyDetector:
                 'slack_entries': len(self.slack_data),
                 'zoom_entries': len(self.zoom_data),
                 'teamtailor_entries': len(self.teamtailor_data),
+                'okta_entries': len(self.okta_data),
                 'total_anomalies': len(self.anomalies)
             },
             'anomalies': self.anomalies
@@ -144,7 +170,7 @@ class AnomalyDetector:
         print(f"DETECTION SUMMARY")
         print(f"{'='*60}")
         print(
-            f"Entries analyzed: {report['summary']['slack_entries'] + report['summary']['zoom_entries'] + report['summary']['teamtailor_entries']}")
+            f"Entries analyzed: {report['summary']['slack_entries'] + report['summary']['zoom_entries'] + report['summary']['teamtailor_entries'] + report['summary']['okta_entries']}")
         print(
             f"Anonymous VPN detections: {report['summary']['total_anomalies']}")
         print(f"Critical alerts (displayed): {displayed_count}")
@@ -185,7 +211,7 @@ class AnomalyDetector:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Detect IP anomalies in Slack and Zoom logs',
+        description='Detect IP anomalies in Slack, Zoom, Teamtailor and Okta logs',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -213,6 +239,12 @@ Examples:
                         help='Zoom Client Secret (env: ZOOM_CLIENT_SECRET)')
     parser.add_argument('--no-teamtailor', action='store_true',
                         help='Skip Teamtailor even if TEAMTAILOR_API_KEY_<WORKSPACE> env vars are set')
+    parser.add_argument('--okta-org-url', default=os.environ.get('OKTA_ORG_URL'),
+                        help='Okta org or custom domain, e.g. https://auth.example.com (env: OKTA_ORG_URL)')
+    parser.add_argument('--okta-token', default=os.environ.get('OKTA_API_TOKEN'),
+                        help='Okta API token, used as SSWS (env: OKTA_API_TOKEN)')
+    parser.add_argument('--no-okta', action='store_true',
+                        help='Skip Okta even if OKTA_ORG_URL and OKTA_API_TOKEN are set')
     parser.add_argument('--days', type=int, default=30,
                         help='Number of days to analyze (default: 30)')
 
@@ -235,9 +267,14 @@ Examples:
 
     # Validate arguments
     tt_keys = {} if args.no_teamtailor else teamtailor_keys()
-    if not (args.slack_token or args.zoom_account_id or tt_keys):
+    use_okta = bool(args.okta_org_url and args.okta_token) and not args.no_okta
+    if not (args.slack_token or args.zoom_account_id or tt_keys or use_okta):
         parser.error(
-            "At least one data source (--slack-token, --zoom-account-id or TEAMTAILOR_API_KEY_<WORKSPACE>) must be provided")
+            "At least one data source (--slack-token, --zoom-account-id, --okta-org-url with "
+            "--okta-token, or TEAMTAILOR_API_KEY_<WORKSPACE>) must be provided")
+
+    if bool(args.okta_org_url) != bool(args.okta_token) and not args.no_okta:
+        parser.error("--okta-org-url and --okta-token must be given together")
 
     if args.zoom_account_id and not (args.zoom_client_id and args.zoom_client_secret):
         parser.error(
@@ -286,6 +323,10 @@ Examples:
             for account, key in tt_keys.items():
                 futures.append(executor.submit(
                     detector.extract_teamtailor_data, key, account, args.days))
+
+            if use_okta:
+                futures.append(executor.submit(
+                    detector.extract_okta_data, args.okta_org_url, args.okta_token, args.days))
 
             # File enrichment is a cheap local lookup, so write an interim
             # report as each source finishes instead of waiting for both.
