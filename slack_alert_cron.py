@@ -765,9 +765,12 @@ def run(args, webhook):
         report = json.load(f)
     anomalies = report['anomalies']
     s = report.get('summary') or {}
+    counts = ' '.join(f"{name} {s[key]}" for name, key in
+                      (('slack', 'slack_entries'), ('zoom', 'zoom_entries'),
+                       ('teamtailor', 'teamtailor_entries'), ('okta', 'okta_entries'))
+                      if key in s)
     log((f"detector {elapsed:.0f}s" if live else f"report {args.report}")
-        + f": slack {s.get('slack_entries')} zoom {s.get('zoom_entries')} teamtailor {s.get('teamtailor_entries')}"
-        f" anomalies {len(anomalies)}")
+        + f": {counts} anomalies {len(anomalies)}")
     if live:
         bare, ai = referrer_findings()
         anomalies += bare
