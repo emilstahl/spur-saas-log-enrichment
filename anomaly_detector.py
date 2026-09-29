@@ -20,6 +20,12 @@ from extractors.okta_extractor import OktaExtractor
 
 TEAMTAILOR_KEY_PREFIX = 'TEAMTAILOR_API_KEY_'
 OKTA_PROXY_TAG = 'OKTA_FLAGGED_PROXY'
+# AS orgs whose isProxy verdict is not worth alerting on, matched as lowercase substrings.
+# iCloud Private Relay egresses through Akamai, Cloudflare and Fastly: on this org they were
+# 310 of the 316 isProxy addresses staff used in 90 days, every one a legitimate Apple user.
+# Without this the flag is unusable. Override with OKTA_PROXY_IGNORE_ASORG (comma separated);
+# a sanctioned corporate VPN gateway belongs here too.
+DEFAULT_PROXY_IGNORE_ASORG = ('akamai', 'cloudflare', 'fastly')
 REPO = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -42,6 +48,14 @@ def teamtailor_keys() -> Dict[str, str]:
     """{workspace: api_key} from TEAMTAILOR_API_KEY_<WORKSPACE> env vars, e.g. TEAMTAILOR_API_KEY_DK."""
     return {k[len(TEAMTAILOR_KEY_PREFIX):].lower(): v
             for k, v in os.environ.items() if k.startswith(TEAMTAILOR_KEY_PREFIX) and v}
+
+
+def okta_proxy_ignored() -> List[str]:
+    """AS-org substrings whose isProxy verdict is ignored, from OKTA_PROXY_IGNORE_ASORG."""
+    raw = (os.environ.get('OKTA_PROXY_IGNORE_ASORG') or '').strip()
+    if not raw:
+        return list(DEFAULT_PROXY_IGNORE_ASORG)
+    return [t.strip().lower() for t in raw.split(',') if t.strip()]
 
 
 def okta_event_types() -> List[str]:
@@ -145,10 +159,14 @@ class AnomalyDetector:
         Entries already flagged by the watchlist are left alone rather than duplicated."""
         if (os.environ.get('OKTA_ALERT_ON_PROXY') or '').strip().lower() not in ('1', 'true', 'yes'):
             return []
+        ignored = okta_proxy_ignored()
         found = []
         for entry in entries:
             if entry.get('source') != 'okta' or not entry.get('is_proxy'):
                 continue
+            as_org = (entry.get('as_org') or '').lower()
+            if any(skip in as_org for skip in ignored):
+                continue  # consumer relay or a sanctioned gateway, not a finding
             if entry.get('ip') and enricher.lookup(entry['ip']):
                 continue  # already reported as a watchlist hit
             found.append({

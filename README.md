@@ -153,8 +153,21 @@ distinguishable downstream; the Slack alert marks a non-success outcome as *auth
 Each row keeps Okta's own `securityContext.isProxy` verdict along with the country and AS
 org, and the alert prints them, because "Astrill from China" is a different conversation
 from the same operator at a known office range. Set `OKTA_ALERT_ON_PROXY=1` to alert on
-`isProxy` directly rather than only on watchlist hits — off by default, since an org that
-routes a business unit through a shared VPN gateway gets a burst on first enable.
+`isProxy` directly rather than only on watchlist hits — off by default.
+
+Before enabling it, note that the raw flag is mostly iCloud Private Relay: measured over 90
+days on a 4,000-user org, 310 of the 316 `isProxy` addresses staff used were Akamai,
+Cloudflare or Fastly, Apple's three relay egress partners. Those AS orgs are therefore
+excluded by default, which turned 267 findings into 5 over the same period. Override the list
+with `OKTA_PROXY_IGNORE_ASORG` (comma separated, matched as lowercase substrings) — a
+sanctioned corporate VPN gateway belongs in it too:
+
+```bash
+echo "OKTA_PROXY_IGNORE_ASORG=akamai,cloudflare,fastly,proton ag" >> .env
+```
+
+Harvesting `isProxy` addresses into `data.csv` is the wrong move for the same reason: they are
+addresses your own staff use, so they belong in a per-finding signal, not a blocklist.
 
 Only `actor.type == "User"` rows are kept, so API-token and application actors do not appear
 as findings. `--no-okta` skips the source. Okta identities are internal, so the cron's
