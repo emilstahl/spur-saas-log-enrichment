@@ -104,6 +104,28 @@ If no local event dump exists, pull one with `OktaExtractor` day by day (see
 
 `--hours` takes fractions. The detector reads `.env` itself, so no environment setup.
 
+## Known gaps
+
+Standing blind spots. Worth re-reading before concluding "nothing found".
+
+- **Corporate VPN egresses are not fully inventoried.** Three are known — `195.184.253.28`
+  (Proton, 21 accounts), `172.105.249.178` and `212.71.254.38` (both SimplyBook, Linode, in
+  the GitLab ACL). SimplyBook stated on 2026-09-29 that they run "a few" more that have not
+  been identified. **Every unlisted egress adds staff to a location blind spot**: anyone
+  behind a gateway shows the gateway's country, not their own, so location analysis silently
+  skips them. That is the same blind spot that hid an employee working from China and
+  southeast Asia for 80 days while recorded as based in Georgia. Ask whoever maintains the
+  GitLab IP allow-list for the full set, and record each one.
+- **`data.csv` has no IPRoyal coverage.** It is a partial Spur export — comprehensive on
+  SOCKS5, the VDI/KVM families and Astrill, and missing IPRoyal entirely, which Spur measures
+  at 66.5% of AS7849 alone. There is no Spur API access to refresh it, so coverage comes from
+  ASN ranges (RIPEstat) and hand-added confirmed exits.
+- **Teamtailor audit retention is 30 days**, Okta's is 90. Applicant hunts cannot reach
+  further back than a month. A preserved Okta capture for 2026-06-30 → 09-28 is kept in
+  `~/work/okta-events-2026Q3/` precisely because that window is now unrecoverable.
+- **A quiet Teamtailor log may mean retries absorbed the problem**, not that upstream is
+  healthy — a stall only surfaces if it survives three attempts.
+
 ## Things that are not what they look like
 
 - **`x-rate-limit-reset` means different things.** Teamtailor sends seconds remaining; Okta
@@ -115,8 +137,6 @@ If no local event dump exists, pull one with `OktaExtractor` day by day (see
   pulled rather than a hand-written list.
 - **Geolocation is Okta's and is sometimes wrong.** AS7849 resolves to "Greenfield, Wisconsin"
   for addresses on a Western Massachusetts ISP. Don't build a case on geo alone.
-- **A quiet log may mean retries absorbed the problem.** Teamtailor stalls only surface now if
-  one survives three attempts.
 
 ## Backups
 
