@@ -1,8 +1,16 @@
-# One-off security checks
+# spur-saas-log-enrichment
+
+Detects anonymising VPN/proxy and watchlisted IPs across Slack, Zoom, Teamtailor and Okta
+logs and posts new findings to Slack. `slack_alert_cron.py` runs every 30 minutes; see
+`README.md` for configuration and the data sources.
+
+Read the ground rules below before running anything.
+
+## One-off security checks
 
 Notes for whoever (person or agent) picks this repo up to answer a question like "is this
-user / IP / applicant a problem?". The scheduled job is `slack_alert_cron.py`; everything
-here is the manual side.
+user / IP / applicant a problem?". The scheduled job is the automated side; everything here
+is the manual side.
 
 ## Ground rules
 
