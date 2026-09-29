@@ -60,6 +60,9 @@ NOTED = os.path.join(REPO, '.teamtailor_noted.json')
 AI_NOTED = os.path.join(REPO, '.teamtailor_ai_noted.json')
 LOCK = os.path.join(REPO, '.slack_alert_cron.lock')
 WATERMARK = os.path.join(REPO, '.slack_alert_watermark.json')
+# isProxy findings are a lower-signal stream, so they go to their own channel rather than
+# diluting the DPRK alerts. Unset means hold them, never fall back to the main webhook.
+PROXY_WEBHOOK_VAR = 'SLACK_WEBHOOK_URL_PROXY'
 TT_API = 'https://api.teamtailor.com/v1'
 TT_NOTE = ('<p>Security flag: identified as a possible DPRK (North Korean) IT worker.</p>'
            '<p>Do not progress or engage with this candidate.</p>'
@@ -187,12 +190,21 @@ def window_label(hours):
     return f"{hours:.1f}".rstrip('0').rstrip('.') + 'h'
 
 
+def proxy_finding(a):
+    """True for a finding raised by Okta's isProxy verdict rather than a watchlist match."""
+    return (a.get('enrichment') or {}).get('source') == 'okta_is_proxy'
+
+
 def check_config(dry_run):
     """Fail on a missing webhook before any note is posted; warn about disabled features."""
     webhook = os.environ.get('SLACK_WEBHOOK_URL')
     if not webhook and not dry_run:
         warn("SLACK_WEBHOOK_URL is not set (env or .env); refusing to run")
         sys.exit(2)
+    if (os.environ.get('OKTA_ALERT_ON_PROXY') or '').strip().lower() in ('1', 'true', 'yes') \
+            and not os.environ.get(PROXY_WEBHOOK_VAR):
+        warn(f"OKTA_ALERT_ON_PROXY is on but {PROXY_WEBHOOK_VAR} is not set; isProxy findings "
+             f"will be held rather than posted to the main channel")
     if bool(os.environ.get('OKTA_ORG_URL')) != bool(os.environ.get('OKTA_API_TOKEN')):
         warn("only one of OKTA_ORG_URL / OKTA_API_TOKEN is set; the Okta System Log check is disabled")
     if teamtailor_keys() and not (os.environ.get('TEAMTAILOR_NOTE_USER_ID') or os.environ.get('TEAMTAILOR_NOTE_USER_EMAIL')
@@ -817,15 +829,31 @@ def run(args, webhook, started=None):
 
     add_teamtailor_emails(new)  # read-only lookups, fine in a dry run too
     post_teamtailor_notes(new, dry_run=args.dry_run)
-    payload = build_payload(new, hours)
+    proxy_new = [a for a in new if proxy_finding(a)]
+    main_new = [a for a in new if not proxy_finding(a)]
 
     if args.dry_run:
-        log(f"dry run: {len(new)} new finding(s); Slack payload follows (nothing posted, state untouched)")
-        print(json.dumps(payload, indent=2, ensure_ascii=False), flush=True)
+        log(f"dry run: {len(new)} new finding(s) ({len(main_new)} main, {len(proxy_new)} isProxy); "
+            f"payloads follow (nothing posted, state untouched)")
+        for label, group in (('main', main_new), ('isProxy', proxy_new)):
+            if group:
+                print(f"--- {label} ---", flush=True)
+                print(json.dumps(build_payload(group, hours), indent=2, ensure_ascii=False), flush=True)
         return
 
-    post_slack(webhook, payload)
-    log(f"posted {len(new)} new finding(s) to Slack")
+    if main_new:
+        post_slack(webhook, build_payload(main_new, hours))
+        log(f"posted {len(main_new)} new finding(s) to Slack")
+    if proxy_new:
+        proxy_webhook = os.environ.get(PROXY_WEBHOOK_VAR)
+        if proxy_webhook:
+            post_slack(proxy_webhook, build_payload(proxy_new, hours))
+            log(f"posted {len(proxy_new)} new isProxy finding(s) to the proxy channel")
+        else:
+            # Hold rather than misroute: drop their keys so they post once the hook exists.
+            fail(f"{PROXY_WEBHOOK_VAR} is not set; holding {len(proxy_new)} isProxy finding(s)")
+            for a in proxy_new:
+                seen.discard(finding_key(a))
 
     # Save state only after a successful post, so failures retry next run.
     # ponytail: entries carry no date, so the file grows forever (a few entries/day) and a

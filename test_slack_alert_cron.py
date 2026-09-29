@@ -725,6 +725,48 @@ class TestMain(Base):
         finally:
             cron.release_lock(fd)
 
+    def test_isproxy_findings_go_to_their_own_webhook(self):
+        """Lower-signal isProxy findings must not dilute the DPRK channel."""
+        self.fake_session_request(self.tt_get_or_post)
+        watchlist = self.anomaly(source='slack', email='a@team.blue', ip='1.1.1.1')
+        proxy = dict(self.anomaly(source='okta', email='b@team.blue', ip='2.2.2.2'),
+                     enrichment={'source': 'okta_is_proxy', 'matched': True})
+        posts = []
+        with patch.object(sys, 'argv', ['x']), patch.object(cron, 'run_detector', return_value=1.0), \
+                patch.object(cron, 'REPORT', self.report([watchlist, proxy])), \
+                patch.object(cron, 'referrer_findings', lambda hours=None: ([], [])), \
+                patch.dict(os.environ, {cron.PROXY_WEBHOOK_VAR: 'https://hooks.example/proxy'}), \
+                patch.object(cron.requests, 'post',
+                             side_effect=lambda url, **kw: posts.append((url, kw)) or resp()), \
+                redirect_stdout(io.StringIO()):
+            cron.main()
+        urls = [u for u, _ in posts]
+        self.assertEqual(urls, ['https://hooks.example/x', 'https://hooks.example/proxy'])
+        self.assertIn('2.2.2.2', json.dumps(posts[1][1]))   # the proxy one went to the proxy hook
+        self.assertNotIn('2.2.2.2', json.dumps(posts[0][1]))
+        self.assertEqual(len(read(cron.STATE)), 2)          # both remembered
+
+    def test_isproxy_findings_are_held_when_no_proxy_webhook_is_set(self):
+        """Never fall back to the main channel; hold them so they post once it is configured."""
+        self.fake_session_request(self.tt_get_or_post)
+        proxy = dict(self.anomaly(source='okta', email='b@team.blue', ip='2.2.2.2'),
+                     enrichment={'source': 'okta_is_proxy', 'matched': True})
+        posts = []
+        env = {k: v for k, v in os.environ.items() if k != cron.PROXY_WEBHOOK_VAR}
+        with patch.object(sys, 'argv', ['x']), patch.object(cron, 'run_detector', return_value=1.0), \
+                patch.object(cron, 'REPORT', self.report([proxy])), \
+                patch.object(cron, 'referrer_findings', lambda hours=None: ([], [])), \
+                patch.dict(os.environ, env, clear=True), \
+                patch.object(cron.requests, 'post',
+                             side_effect=lambda url, **kw: posts.append(url) or resp()), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                cron.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(posts, [])                          # nothing posted anywhere
+        self.assertEqual(read(cron.STATE), [])               # not remembered, so it retries
+        self.assertIn('holding 1 isProxy finding', self.stderr())
+
     def test_non_fatal_failures_exit_1_after_the_work_is_done(self):
         self.fake_session_request(self.tt_get_or_post)
 

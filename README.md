@@ -169,6 +169,12 @@ echo "OKTA_PROXY_IGNORE_ASORG=akamai,cloudflare,fastly,proton ag" >> .env
 Harvesting `isProxy` addresses into `data.csv` is the wrong move for the same reason: they are
 addresses your own staff use, so they belong in a per-finding signal, not a blocklist.
 
+isProxy findings are a lower-signal stream than a watchlist hit, so they post to their own
+channel via `SLACK_WEBHOOK_URL_PROXY` rather than diluting the main one. If that variable is
+unset while the flag is on, they are **held** — logged as a failure and left out of the state
+file so they post on the next run once the webhook exists — rather than falling back to the
+main channel.
+
 Only `actor.type == "User"` rows are kept, so API-token and application actors do not appear
 as findings. `--no-okta` skips the source. Okta identities are internal, so the cron's
 `WHITELIST` applies to them as it does to Slack and Zoom.
@@ -208,6 +214,9 @@ Credentials are read from `.env` next to the script (real environment variables 
 | `TEAMTAILOR_NOTE_USER_ID_<WORKSPACE>` | Per-workspace author override |
 | `OKTA_ORG_URL` / `OKTA_API_TOKEN` | Okta System Log source (both, or neither) |
 | `OKTA_EVENT_TYPES` | Narrow the pull to these event types (default: all) |
+| `OKTA_ALERT_ON_PROXY` | `1` alerts on Okta's isProxy verdict as well as watchlist hits |
+| `OKTA_PROXY_IGNORE_ASORG` | AS orgs whose isProxy verdict is ignored (default: the relay CDNs) |
+| `SLACK_WEBHOOK_URL_PROXY` | Separate webhook for isProxy findings; unset holds them |
 
 Teamtailor user ids are per workspace. The author is resolved in that order; when nothing
 matches in a workspace, the note is posted as the recruiter (job owner) of the candidate's
