@@ -307,6 +307,9 @@ saas-enrichment/
 ├── slack_alert_cron.py       # Cron wrapper: new findings -> Slack, Teamtailor profile notes
 ├── note_report.py            # Retry profile notes for an already-posted report
 ├── user_logins.py            # One Slack user's recent logins, watchlist-flagged
+├── user_check.py             # Per-user IP check
+├── test_*.py                 # Offline unit tests (python -m unittest discover -p 'test_*.py')
+├── AGENTS.md                 # Contributor/agent notes
 ├── reports/                  # Output directory (auto-created)
 ├── examples/                 # Sample outputs
 └── test_credentials.py       # Credential testing tool
